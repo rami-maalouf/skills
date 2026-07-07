@@ -20,23 +20,29 @@ safe_link() {
     echo "  [Linked] $target_link -> $source_file"
 }
 
+# --- Shared agent instructions (single origin: AGENTS.md) ---
+echo "Linking shared AGENTS.md..."
+mkdir -p ~/.claude ~/.codex ~/.gemini
+safe_link "$CONFIG_DIR/AGENTS.md" ~/AGENTS.md
+safe_link "$CONFIG_DIR/AGENTS.md" ~/.claude/CLAUDE.md
+safe_link "$CONFIG_DIR/AGENTS.md" ~/.codex/AGENTS.md
+safe_link "$CONFIG_DIR/AGENTS.md" ~/.gemini/GEMINI.md
+
 # --- Claude Code ---
 echo "Linking Claude Code..."
 mkdir -p ~/.claude
 safe_link "$CONFIG_DIR/claude-code/config/settings.json" ~/.claude/settings.json
-safe_link "$CONFIG_DIR/claude-code/config/CLAUDE.md" ~/.claude/CLAUDE.md
 
 # --- Codex ---
 echo "Linking Codex..."
 mkdir -p ~/.codex/rules
 safe_link "$CONFIG_DIR/codex/config.toml" ~/.codex/config.toml
-safe_link "$CONFIG_DIR/codex/instructions.md" ~/.codex/instructions.md
 safe_link "$CONFIG_DIR/codex/rules/default.rules" ~/.codex/rules/default.rules
 
 # --- Gemini ---
 echo "Linking Gemini..."
 mkdir -p ~/.gemini
-# safe_link "$CONFIG_DIR/gemini/GEMINI.md" ~/.gemini/GEMINI.md
+# GEMINI.md is linked to the shared AGENTS.md above
 # safe_link "$CONFIG_DIR/gemini/settings.json" ~/.gemini/settings.json
 
 # --- Antigravity ---
