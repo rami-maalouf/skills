@@ -24,7 +24,7 @@ Getting attribution wrong poisons everything downstream - you would record obser
 
 - Reconcile the dual-channel echoes (heuristics in the reference). Strip echoes before reading turns as anyone's real words.
 - Use the clean auto-generated Summary / Action Items / Decisions as your source of truth for who did and said what - they name real people.
-- Resolve each speaker to a real name, checking `My Social Circle/` first for the canonical spelling so you do not create duplicates.
+- Resolve each speaker to a real name. For work calls, read the private roster at `My Social Circle/Expo Team.md` (names, roles, relationship to Rami) first; also check `My Social Circle/` person notes for the canonical spelling so you do not create duplicates.
 - When the channels are too tangled to separate a person's contribution confidently, say so in the report. An honest "attribution here is uncertain" is far more useful to Rami than confident fiction.
 
 ## Workflow

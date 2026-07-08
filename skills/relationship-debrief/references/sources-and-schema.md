@@ -34,7 +34,8 @@ the `You` turn here is an echo of Speaker 1, not Rami speaking. note also that S
 
 - `You` maps to Rami only for his de-echoed turns.
 - map each `Speaker N` to a real name using: names used in conversation ("thanks <name>", "<name>, what do you think"), the summary/action items, and the cast of his known team.
-- before adopting a name, check `My Social Circle/` for an existing note so you use the canonical spelling and do not create a duplicate (a first name likely resolves to an existing full-name note). the roster of known people lives in the vault (`My Social Circle/`) and the voiceprint store - do not hardcode names here.
+- before adopting a name, check `My Social Circle/` for an existing note so you use the canonical spelling and do not create a duplicate (a first name likely resolves to an existing full-name note).
+- the roster of coworkers - names, roles, relationship to Rami, and how to work with each - lives in the vault at `My Social Circle/Expo Team.md` (gitignored, private). read it before resolving speakers on a work call, and propose additions to it when a new teammate appears. do not hardcode names in this skill.
 - always show the resulting speaker -> name map with a confidence note at the top of the report, so Rami can correct it. early calls will need correction; that is expected.
 
 ## 4. the vault relationship CRM (`My Social Circle/`)

@@ -10,7 +10,7 @@ Apply three skills by reading each SKILL.md and following it (read a skill befor
 
 Steps:
 
-A. Run the relationship-debrief skill on the transcript. This is the body of the report. Honor its handling of the dual-channel speaker-attribution problem: reconcile the echoed `You` channel before attributing anyone's words, resolve speakers to real names with a confidence note, and check `My Social Circle/` for canonical name spellings so you do not create duplicates.
+A. Run the relationship-debrief skill on the transcript. This is the body of the report. Honor its handling of the dual-channel speaker-attribution problem: reconcile the echoed `You` channel before attributing anyone's words, resolve speakers to real names with a confidence note, and check `My Social Circle/` for canonical name spellings so you do not create duplicates. For work calls, read the private coworker roster at `My Social Circle/Expo Team.md` (names, roles, relationship to Rami) before resolving speakers, and include proposed roster additions in the report when a new teammate appears.
 
 B. CRM writes - HYBRID policy:
    - AUTO-WRITE the factual #meeting note to the vault at `My Meetings/<call title>.md`. Use the meeting-note shape described in the relationship-debrief reference: frontmatter with `tags: [meeting]`, `Attendees` as `[[Name]]` links, a `Summary`, `MeetingDate`; a short `## Notes` section; and `## Action Items`. Include a one-line speaker-confidence caveat in the note body and a link back to the debrief report. This is a low-risk factual log, so writing it automatically is intended.

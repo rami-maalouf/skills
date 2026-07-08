@@ -6,7 +6,7 @@ Read the report's "## Proposed CRM updates" section. The `#meeting` note was alr
 
 For each proposed person:
 
-1. Resolve identity first. Look for an existing note at `My Social Circle/<Name>.md`, and check `My Social Circle/CLAUDE.md` for the schema and the two template variants. Resolve nicknames against existing notes (e.g. "Dan" -> existing "Dan Kelly.md" if present) so you never create a duplicate person.
+1. Resolve identity first. Look for an existing note at `My Social Circle/<Name>.md`, and check `My Social Circle/CLAUDE.md` for the schema and the two template variants. Resolve nicknames against existing notes and the coworker roster at `My Social Circle/Expo Team.md` (a first name likely resolves to an existing full-name note) so you never create a duplicate person.
 
 2. If the note does NOT exist, create it from the proposal using the CURRENT bare-`person` template variant, tagged `person/work`, with a tight one-line `Summary`, `KeepInTouch: true`, and `LastChatted` set to the call date. Include a `### How to communicate with them` subsection under `## Details`.
 
