@@ -9,6 +9,7 @@ LIFE_OS="/Users/rami/Documents/life-os"
 VAULT="/Users/rami/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian"
 TRANSCRIPTS_ROOT="/Users/rami/Documents/transcriptions"
 PROMPT_FILE="${0:A:h}/debrief-prompt.md"
+PRESENTING_CHECK="${0:A:h}/presenting-check.sh"
 NOTIFIER="/opt/homebrew/bin/terminal-notifier"
 MODEL="${DEBRIEF_MODEL:-}"   # empty = use configured default; set DEBRIEF_MODEL=opus for richer reads
 
@@ -38,17 +39,37 @@ set +e
 STATUS=$?
 set -e
 
+# decide notification style once: presenting (screen shared AND mic in use) => quiet banner only, no sticky modal
+if "$PRESENTING_CHECK" 2>/dev/null; then PRESENTING=1; else PRESENTING=0; fi
+
 if [[ $STATUS -ne 0 || ! -f "$REPORT" ]]; then
   echo "[$(date)] FAILED (status=$STATUS, report=$([[ -f $REPORT ]] && echo present || echo missing))" | tee -a "$RUN_LOG"
-  [[ -x "$NOTIFIER" ]] && "$NOTIFIER" -title "Call debrief failed" -subtitle "$NAME" \
-    -message "See $RUN_LOG" -sound Basso
+  # audible, DnD-piercing banner + a sticky critical alert that opens the log on click
+  [[ -x "$NOTIFIER" ]] && "$NOTIFIER" -title "Call debrief FAILED" -subtitle "$NAME" \
+    -message "See $RUN_LOG" -sound Basso -ignoreDnD
+  if [[ $PRESENTING -eq 0 ]]; then
+    nohup osascript \
+      -e "set r to button returned of (display alert \"Call debrief FAILED\" message \"$NAME could not be debriefed.\" as critical buttons {\"OK\", \"Open log\"} default button \"OK\" giving up after 14400)" \
+      -e "if r is \"Open log\" then do shell script \"open \" & quoted form of \"$RUN_LOG\"" \
+      >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+  fi
   exit "${STATUS:-1}"
 fi
 
 echo "[$(date)] done -> $REPORT" | tee -a "$RUN_LOG"
-if [[ -x "$NOTIFIER" ]]; then
-  "$NOTIFIER" -title "Call debrief ready" -subtitle "$NAME" \
-    -message "Tap to read the debrief" -sound default -execute "open '$REPORT'"
+# 1) audible banner + Notification Center record, shown even during Focus/Do Not Disturb
+[[ -x "$NOTIFIER" ]] && "$NOTIFIER" -title "Call debrief ready" -subtitle "$NAME" \
+  -message "Tap to read the debrief" -sound Hero -ignoreDnD -execute "open '$REPORT'"
+# 2) sticky critical alert: stays on screen until you act, opens the report on click.
+# detached so it never blocks the pipeline; survives job exit because the plist sets AbandonProcessGroup.
+# SUPPRESSED while presenting (screen shared + mic in use) so it never pops over a shared screen - the banner still fired above.
+if [[ $PRESENTING -eq 0 ]]; then
+  nohup osascript \
+    -e "set r to button returned of (display alert \"Call debrief ready\" message \"$NAME\" as critical buttons {\"Later\", \"Open debrief\"} default button \"Open debrief\" giving up after 14400)" \
+    -e "if r is \"Open debrief\" then do shell script \"open \" & quoted form of \"$REPORT\"" \
+    >/dev/null 2>&1 &
+  disown 2>/dev/null || true
 else
-  /usr/bin/osascript -e "display notification \"$NAME\" with title \"Call debrief ready\" sound name \"default\""
+  echo "[$(date)] presenting (screen share + mic) -> quiet banner only, sticky alert suppressed" | tee -a "$RUN_LOG"
 fi

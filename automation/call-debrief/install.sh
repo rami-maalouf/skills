@@ -23,7 +23,7 @@ mkdir -p "$HOME/.mac-automations" "$STATE_DIR" "$LOG_DIR" "$HOME/Library/LaunchA
 # replace any old symlink-into-Documents with a REAL directory of copies
 [[ -L "$RUNTIME" ]] && rm -f "$RUNTIME"
 mkdir -p "$RUNTIME"
-cp "$REPO_DIR"/{watch-openoats.sh,run-debrief.sh,apply-proposals.sh,debrief-prompt.md,apply-proposals-prompt.md} "$RUNTIME"/
+cp "$REPO_DIR"/{watch-openoats.sh,run-debrief.sh,apply-proposals.sh,presenting-check.sh,debrief-prompt.md,apply-proposals-prompt.md} "$RUNTIME"/
 chmod +x "$RUNTIME"/*.sh
 
 # seed state with the existing backlog so first load does NOT debrief old calls
@@ -49,7 +49,9 @@ cat > "$PLIST" <<PLIST_EOF
     <string>$WATCH_DIR</string>
   </array>
   <key>StartInterval</key>
-  <integer>1800</integer>
+  <integer>120</integer>
+  <key>AbandonProcessGroup</key>
+  <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
