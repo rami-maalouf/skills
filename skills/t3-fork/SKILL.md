@@ -6,55 +6,31 @@ disable-model-invocation: true
 
 # t3-fork
 
-Creates a new T3 Code thread whose Claude Code session is a copy of an existing conversation. By default the new thread starts with the full prior context. Use `--first n` or `--last n` to copy only a prefix or a suffix of the user turns instead. When forking the live conversation (`--current`), the last user turn is the command that triggered the fork itself, so it is dropped by default.
+Copies a T3 Code conversation into a new thread, full history included. `--first n` keeps only the first n user turns; `--last n` keeps only the last n, with no memory of anything earlier. Forking `--current` drops the triggering `/t3-fork` turn itself by default.
 
-## How it works
-
-1. Reads the Claude session id behind a T3 thread from `~/.t3/userdata/state.sqlite` (read only).
-2. Copies the transcript `~/.claude/projects/<slug>/<session>.jsonl` to a new session id. Subagent transcripts are copied too.
-3. Registers the copy through T3's own transcript importer (`agentSessions.import` over the local WebSocket RPC), so the conversation history is visible in the new thread. The importer is all-or-nothing per project, so the script shields every other Claude and Codex transcript of the project with temporary runtime bindings during the call and removes them right after. The first message in the new thread resumes the copied session.
-
-T3 Code must be running. Requires `bun`.
+Reads the session id for a thread from `~/.t3/userdata/state.sqlite` (read only), copies the transcript to a new session id, and registers it through T3's own transcript importer so history shows in the UI. T3 Code must be running. Requires `bun`, macOS only.
 
 ## Commands
 
-Script: `scripts/fork.ts` next to this file. Run it with `bun run`.
-
 ```bash
-# fork the conversation this agent is running inside
-bun run <skill-dir>/scripts/fork.ts --current
-
-# see the user turns first, then branch after turn 3 (keeps turns 1-3, drops the rest)
-bun run <skill-dir>/scripts/fork.ts --current --list
-bun run <skill-dir>/scripts/fork.ts --current --first 3 --title "alt approach"
-
-# start a thread from only the last 2 turns, with no memory of anything before them
-bun run <skill-dir>/scripts/fork.ts --current --last 2 --title "just the recent part"
-
-# fork another thread or a plain claude cli session
-bun run <skill-dir>/scripts/fork.ts --thread <t3-thread-id>
-bun run <skill-dir>/scripts/fork.ts --session <claude-session-uuid>
-
-# only copy the transcript, do not create a t3 thread
-bun run <skill-dir>/scripts/fork.ts --current --no-register
-
-# keep the "/t3-fork" turn itself in the copy, instead of dropping it
-bun run <skill-dir>/scripts/fork.ts --current --include-trigger
-
-# preview without writing anything
-bun run <skill-dir>/scripts/fork.ts --current --dry-run
+bun run <skill-dir>/scripts/fork.ts --current                       # fork this conversation
+bun run <skill-dir>/scripts/fork.ts --current --list                # show numbered turns first
+bun run <skill-dir>/scripts/fork.ts --current --first 3              # keep turns 1-3
+bun run <skill-dir>/scripts/fork.ts --current --last 2               # keep only the last 2 turns
+bun run <skill-dir>/scripts/fork.ts --thread <t3-thread-id>          # fork another thread
+bun run <skill-dir>/scripts/fork.ts --session <claude-session-uuid>  # fork any claude session
+bun run <skill-dir>/scripts/fork.ts --current --no-register          # copy the transcript only
+bun run <skill-dir>/scripts/fork.ts --current --dry-run              # preview, change nothing
 ```
 
-## Agent workflow
+Add `--title "text"` to any of these. `--include-trigger` keeps the `/t3-fork` turn instead of dropping it.
 
-1. If the user wants to branch from an earlier point, run `--list` and show the turns. Ask whether they mean "keep the first N" (`--first`) or "keep only the last N" (`--last`) if unclear.
-2. Run the fork with `--current` (default) unless the user names another thread. The turn that invoked the fork is dropped automatically; no need to account for it in `--first`/`--last`.
-3. Report the new thread title and tell the user it is in the T3 sidebar with its history.
+## Workflow
+
+Run `--list` first if the branch point is unclear, then ask the user whether they want `--first` or `--last`. Report the new thread's title and that it is in the T3 sidebar with its history.
 
 ## Limits
 
-- `--first n` keeps a prefix (turns 1..n); `--last n` keeps a suffix (the last n turns) and the new thread has no memory of anything before them. Pick one, not both.
-- Dropping the trigger turn only applies to `--current` and only when neither `--first` nor `--last` is given; passing either always cuts exactly there, and `--thread`/`--session` copy the full source since they are not the conversation currently running the command.
-- The new thread shows user and assistant text only (no tool calls), capped by T3 at 200 messages. The importer marks it settled; the script unsettles it so it appears with active threads. Its id is `import:claudeAgent:<session>`, runtime mode is full-access, and the model comes from the transcript.
-- The shield relies on T3 importer internals (it skips transcripts whose runtime binding has a foreign provider instance). A safety net deletes any thread the importer still creates besides the copy. If T3 changes the importer, check the server log for "Could not import an agent session" warnings, which are expected during a fork.
-- macOS only: it runs the T3 server CLI from `/Applications/T3 Code*.app` to issue a short-lived bearer token.
+- Pick one of `--first`/`--last`, not both. The default trigger-drop only applies to `--current` with neither flag given.
+- New threads show user/assistant text only, no tool calls, capped by T3 at 200 messages.
+- The importer is all-or-nothing per project; the script shields other transcripts during the call and removes the shield right after. If T3 changes the importer, "Could not import an agent session" warnings in the server log are expected during a fork.
