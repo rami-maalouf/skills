@@ -122,6 +122,15 @@ echo "Linking Antigravity..."
 mkdir -p ~/.gemini/antigravity
 # safe_link "$CONFIG_DIR/gemini/commandAllowlist.txt" ~/.gemini/antigravity/commandAllowlist.txt
 
+# global skills: canonical copy in ai-agents-config, exposed to every agent
+# via ~/.agents/skills, with ~/.claude/skills pointing at that
+echo "Linking global skills..."
+mkdir -p ~/.agents/skills ~/.claude/skills
+for skill_name in t3-fork-thread; do
+    safe_link "$CONFIG_DIR/skills/$skill_name" ~/.agents/skills/"$skill_name"
+    safe_link "../../.agents/skills/$skill_name" ~/.claude/skills/"$skill_name"
+done
+
 link_skill_collections
 
 echo "All symlinks have been safely created!"
