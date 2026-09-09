@@ -11,7 +11,7 @@ Creates a new T3 Code thread whose Claude Code session is a copy of an existing 
 
 1. Reads the Claude session id behind a T3 thread from `~/.t3/userdata/state.sqlite` (read only).
 2. Copies the transcript `~/.claude/projects/<slug>/<session>.jsonl` to a new session id. Subagent transcripts are copied too.
-3. Registers a new T3 thread through the local T3 server (`/api/orchestration/dispatch`) and binds it to the copied session the same way T3's own transcript importer does. The first message in the new thread resumes the copied session.
+3. Registers the copy through T3's own transcript importer (`agentSessions.import` over the local WebSocket RPC), so the conversation history is visible in the new thread. The importer is all-or-nothing per project, so the script shields every other Claude and Codex transcript of the project with temporary runtime bindings during the call and removes them right after. The first message in the new thread resumes the copied session.
 
 T3 Code must be running. Requires `bun`.
 
@@ -42,9 +42,10 @@ bun run <skill-dir>/scripts/fork.ts --current --dry-run
 
 1. If the user wants to branch from an earlier point, run `--list` and show the turns. Ask which turn to cut after if unclear.
 2. Run the fork with `--current` (default) unless the user names another thread.
-3. Report the new thread title and tell the user it is in the T3 sidebar. Mention the copied history is visible only in the original thread; the model in the new thread still has the full context.
+3. Report the new thread title and tell the user it is in the T3 sidebar with its history.
 
 ## Limits
 
-- The new thread shows no message history in the T3 UI until the first turn. T3's built-in import (`agentSessions.import`) shows history but imports every transcript in the project, so this skill does not use it.
+- The new thread shows user and assistant text only (no tool calls), capped by T3 at 200 messages. Its id is `import:claudeAgent:<session>`, runtime mode is full-access, and the model comes from the transcript.
+- The shield relies on T3 importer internals (it skips transcripts whose runtime binding has a foreign provider instance). A safety net deletes any thread the importer still creates besides the copy. If T3 changes the importer, check the server log for "Could not import an agent session" warnings, which are expected during a fork.
 - macOS only: it runs the T3 server CLI from `/Applications/T3 Code*.app` to issue a short-lived bearer token.

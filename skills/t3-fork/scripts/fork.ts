@@ -6,16 +6,18 @@
 //      session id in provider_session_runtime.resume_cursor_json).
 //   2. copy the session transcript (~/.claude/projects/<slug>/<id>.jsonl)
 //      to a new session id, optionally cut after the n-th user turn.
-//   3. register a new t3 thread that resumes the copied session: create the
-//      thread through t3's http dispatch api and bind the runtime row the
-//      same way t3's own transcript importer does.
+//   3. register the copy in t3 through its own transcript importer
+//      (agentSessions.import over the local websocket rpc) so the history is
+//      visible in the ui. the importer processes every transcript of the
+//      project, so the other transcripts are shielded with temporary runtime
+//      bindings that make the importer skip them, removed right after.
 //
 // usage:
 //   bun run fork.ts [--current | --thread <t3-thread-id> | --session <claude-session-id>]
 //                   [--list] [--up-to <n>] [--title <text>] [--no-register] [--dry-run]
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readdirSync, statSync, cpSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, statSync, cpSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -242,7 +244,9 @@ function transcriptCwd(records: Record[]): string | null {
 }
 
 function rewriteSessionId(records: Record[], from: string, to: string, title: string | null): Record[] {
-  return records.map((r) => {
+  const hasTitle = records.some((r) => r.type === "ai-title");
+  const withTitle = hasTitle || title === null ? records : [{ type: "ai-title", aiTitle: title, sessionId: from }, ...records];
+  return withTitle.map((r) => {
     const copy = { ...r };
     if (copy.sessionId === from) copy.sessionId = to;
     if (title !== null && copy.type === "ai-title" && typeof copy.aiTitle === "string") copy.aiTitle = title;
@@ -311,50 +315,262 @@ function serverOrigin(): string {
   return rt.origin;
 }
 
-async function dispatch(origin: string, token: string, command: Record): Promise<Record> {
-  const res = await fetch(`${origin}/api/orchestration/dispatch`, {
+type WsTicket = { ticket: string };
+
+async function wsTicket(origin: string, token: string): Promise<string> {
+  const res = await fetch(`${origin}/api/auth/websocket-ticket`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify(command),
+    body: "{}",
   });
-  const text = await res.text();
-  if (!res.ok) fail(`t3 dispatch ${command.type} failed (${res.status}): ${text}`);
-  return text ? JSON.parse(text) : {};
+  if (!res.ok) fail(`could not get a websocket ticket (${res.status})`);
+  return ((await res.json()) as WsTicket).ticket;
 }
 
-function insertRuntimeRow(input: {
-  threadId: string;
-  sessionId: string;
-  cwd: string;
-  runtimeMode: string;
-  model: unknown;
-  modelSelection: unknown;
-}): void {
+// minimal effect-rpc client over t3's json websocket: one request, one exit
+function rpcCall(origin: string, ticket: string, tag: string, payload: unknown): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const url = `${origin.replace(/^http/, "ws")}/ws?wsTicket=${encodeURIComponent(ticket)}`;
+    const ws = new WebSocket(url);
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error(`t3 rpc ${tag} timed out`));
+    }, 120_000);
+    ws.onopen = () => ws.send(JSON.stringify({ _tag: "Request", id: "1", tag, payload, headers: [] }));
+    ws.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error(`websocket error while calling ${tag}`));
+    };
+    ws.onmessage = (ev) => {
+      for (const line of String(ev.data).split("\n").filter((l) => l.trim())) {
+        const msg = JSON.parse(line);
+        if (msg._tag === "Exit") {
+          clearTimeout(timer);
+          ws.close();
+          if (msg.exit?._tag === "Success") resolve(msg.exit.value);
+          else reject(new Error(`t3 rpc ${tag} failed: ${JSON.stringify(msg.exit).slice(0, 500)}`));
+        } else if (msg._tag === "Defect") {
+          clearTimeout(timer);
+          ws.close();
+          reject(new Error(`t3 rpc ${tag} defect: ${JSON.stringify(msg.defect).slice(0, 500)}`));
+        }
+      }
+    };
+  });
+}
+
+// t3's importer treats a transcript as eligible when its first cwd is the project
+// root (compared by inode), its mtime is within 30 days, and it is not imported yet
+const RECENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+function firstCwd(path: string): string | null {
+  const fd = readFileSync(path, "utf8");
+  for (const line of fd.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      const cwd = typeof r.cwd === "string" ? r.cwd.trim() : "";
+      if (cwd) return cwd;
+    } catch {
+      // ignore unparsable lines, like the scanner does
+    }
+  }
+  return null;
+}
+
+function firstSessionId(path: string): string | null {
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      if (typeof r.sessionId === "string" && UUID_RE.test(r.sessionId)) return r.sessionId.toLowerCase();
+    } catch {
+      // skip
+    }
+  }
+  return null;
+}
+
+function dirIdentity(path: string): string | null {
+  try {
+    const st = statSync(path);
+    return st.isDirectory() ? `${st.dev}:${st.ino}` : null;
+  } catch {
+    return null;
+  }
+}
+
+type OtherSession = { provider: "claudeAgent" | "codex"; sessionId: string };
+
+function walkJsonl(dir: string, out: string[]): void {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir)) {
+    const p = join(dir, entry);
+    const st = statSync(p);
+    if (st.isDirectory()) walkJsonl(p, out);
+    else if (entry.endsWith(".jsonl")) out.push(p);
+  }
+}
+
+// first record of a codex rollout carries the session id and cwd
+function codexSessionMeta(path: string): { id: string | null; cwd: string | null } {
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      if (r.type === "session_meta") {
+        const id = r.payload?.id ?? r.payload?.session_id;
+        const cwd = r.payload?.cwd;
+        return { id: typeof id === "string" ? id.trim() : null, cwd: typeof cwd === "string" ? cwd.trim() : null };
+      }
+    } catch {
+      // skip
+    }
+  }
+  return { id: null, cwd: null };
+}
+
+// every other transcript t3's importer would pick up for this project:
+// claude code sessions under ~/.claude/projects and codex rollouts under ~/.codex/sessions
+function otherEligibleSessions(workspaceRoot: string, excludePath: string): OtherSession[] {
+  const rootId = dirIdentity(workspaceRoot);
+  if (!rootId) return [];
+  const now = Date.now();
+  const recent = (file: string) => {
+    const st = statSync(file);
+    return st.isFile() && st.mtimeMs <= now && st.mtimeMs >= now - RECENT_WINDOW_MS;
+  };
+  const seen = new Set<string>();
+  const out: OtherSession[] = [];
+  const add = (provider: OtherSession["provider"], sessionId: string | null) => {
+    if (!sessionId) return;
+    const key = `${provider}:${sessionId.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ provider, sessionId: sessionId.toLowerCase() });
+  };
+
+  if (existsSync(CLAUDE_PROJECTS)) {
+    for (const dir of readdirSync(CLAUDE_PROJECTS)) {
+      const full = join(CLAUDE_PROJECTS, dir);
+      if (!statSync(full).isDirectory()) continue;
+      for (const entry of readdirSync(full)) {
+        if (!entry.endsWith(".jsonl")) continue;
+        const file = join(full, entry);
+        if (file === excludePath || !recent(file)) continue;
+        const cwd = firstCwd(file);
+        if (!cwd || dirIdentity(cwd) !== rootId) continue;
+        add("claudeAgent", basename(entry, ".jsonl"));
+        add("claudeAgent", firstSessionId(file));
+      }
+    }
+  }
+
+  const codexFiles: string[] = [];
+  walkJsonl(join(process.env.CODEX_HOME ?? join(HOME, ".codex"), "sessions"), codexFiles);
+  for (const file of codexFiles) {
+    if (!basename(file).startsWith("rollout-") || !recent(file)) continue;
+    const meta = codexSessionMeta(file);
+    if (!meta.cwd || dirIdentity(meta.cwd) !== rootId) continue;
+    add("codex", meta.id);
+  }
+  return out;
+}
+
+const BLOCKER_INSTANCE = "t3-fork-blocker";
+
+// a binding whose provider instance does not match makes the importer skip that
+// transcript with a warning instead of creating a duplicate thread.
+// - no binding yet: insert a placeholder row
+// - binding of a deleted import thread: retag it as "t3-fork-blocker:<original>"
+//   so the importer does not resurrect the thread; the suffix lets us restore it
+// - binding of a visible import thread: leave it, the importer treats it as done
+function insertBlockers(sessions: OtherSession[]): string[] {
+  const db = new Database(T3_DB);
+  const shielded: string[] = [];
+  try {
+    db.exec("pragma busy_timeout = 5000");
+    const insert = db.query(
+      `insert into provider_session_runtime
+         (thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status, last_seen_at, resume_cursor_json, runtime_payload_json)
+       values (?, 'claudeAgent', '${BLOCKER_INSTANCE}', 'claudeAgent', 'full-access', 'stopped', ?, null, '{}')
+       on conflict (thread_id) do nothing`,
+    );
+    const existing = db.query<{ provider_instance_id: string | null; visible: number }, [string, string]>(
+      `select r.provider_instance_id,
+              exists(select 1 from projection_threads t where t.thread_id = ? and t.deleted_at is null) as visible
+       from provider_session_runtime r where r.thread_id = ?`,
+    );
+    const retag = db.query(`update provider_session_runtime set provider_instance_id = ? where thread_id = ?`);
+    const now = new Date().toISOString();
+    for (const s of sessions) {
+      const threadId = `import:${s.provider}:${s.sessionId}`;
+      if (insert.run(threadId, now).changes > 0) {
+        shielded.push(threadId);
+        continue;
+      }
+      const row = existing.get(threadId, threadId);
+      if (!row || row.visible) continue;
+      const original = row.provider_instance_id ?? "";
+      if (original.startsWith(BLOCKER_INSTANCE)) continue;
+      retag.run(`${BLOCKER_INSTANCE}:${original}`, threadId);
+      shielded.push(threadId);
+    }
+  } finally {
+    db.close();
+  }
+  return shielded;
+}
+
+// undo insertBlockers: drop placeholder rows, restore retagged rows
+function removeBlockers(): number {
   const db = new Database(T3_DB);
   try {
     db.exec("pragma busy_timeout = 5000");
-    db.query(
-      `insert into provider_session_runtime
-         (thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status, last_seen_at, resume_cursor_json, runtime_payload_json)
-       values (?, 'claudeAgent', 'claudeAgent', 'claudeAgent', ?, 'stopped', ?, ?, ?)
-       on conflict (thread_id) do nothing`,
-    ).run(
-      input.threadId,
-      input.runtimeMode,
-      new Date().toISOString(),
-      JSON.stringify({ threadId: input.threadId, resume: input.sessionId, turnCount: 0 }),
-      JSON.stringify({ cwd: input.cwd, model: input.model, modelSelection: input.modelSelection }),
-    );
+    const rows = db
+      .query<{ thread_id: string; provider_instance_id: string }, []>(
+        `select thread_id, provider_instance_id from provider_session_runtime where provider_instance_id like '${BLOCKER_INSTANCE}%'`,
+      )
+      .all();
+    const del = db.query(`delete from provider_session_runtime where thread_id = ?`);
+    const restore = db.query(`update provider_session_runtime set provider_instance_id = ? where thread_id = ?`);
+    for (const row of rows) {
+      if (row.provider_instance_id === BLOCKER_INSTANCE) del.run(row.thread_id);
+      else restore.run(row.provider_instance_id.slice(BLOCKER_INSTANCE.length + 1) || null, row.thread_id);
+    }
+    return rows.length;
   } finally {
     db.close();
   }
 }
 
-function deleteRuntimeRow(threadId: string): void {
-  const db = new Database(T3_DB);
+function visibleImportThreadIds(): Set<string> {
+  const db = new Database(T3_DB, { readonly: true });
   try {
-    db.exec("pragma busy_timeout = 5000");
-    db.query(`delete from provider_session_runtime where thread_id = ?`).run(threadId);
+    return new Set(db.query<{ thread_id: string }, []>(`select thread_id from projection_threads where thread_id like 'import:%' and deleted_at is null`).all().map((r) => r.thread_id));
+  } finally {
+    db.close();
+  }
+}
+
+async function dispatch(origin: string, token: string, command: Record): Promise<void> {
+  const res = await fetch(`${origin}/api/orchestration/dispatch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(command),
+  });
+  if (!res.ok) fail(`t3 dispatch ${command.type} failed (${res.status}): ${await res.text()}`);
+}
+
+function importedThreadSummary(threadId: string): { title: string; messages: number } | null {
+  const db = new Database(T3_DB, { readonly: true });
+  try {
+    return db
+      .query<{ title: string; messages: number }, [string, string]>(
+        `select t.title, (select count(*) from projection_thread_messages m where m.thread_id = ?) as messages
+         from projection_threads t where t.thread_id = ? and t.deleted_at is null`,
+      )
+      .get(threadId, threadId);
   } finally {
     db.close();
   }
@@ -461,44 +677,47 @@ async function main() {
     return;
   }
 
-  // 4. register the new thread in t3
-  const modelSelection = thread?.model_selection_json ? JSON.parse(thread.model_selection_json) : { instanceId: "claudeAgent", model: "claude-fable-5-1" };
-  const runtimeMode = thread?.runtime_mode ?? "full-access";
-  const interactionMode = thread?.interaction_mode ?? "default";
-  const threadId = crypto.randomUUID();
+  // 4. register the copy through t3's importer so the history shows in the ui
   const app = findT3App();
   const origin = serverOrigin();
-
-  // the runtime row must exist before the first turn so t3 resumes instead of starting fresh
-  insertRuntimeRow({ threadId, sessionId: newSessionId, cwd: cwd ?? project.workspace_root, runtimeMode, model: modelSelection.model, modelSelection });
-
+  const newThreadId = `import:claudeAgent:${newSessionId}`;
   const issued = issueToken(app);
   try {
-    await dispatch(origin, issued.token, {
-      type: "thread.create",
-      commandId: crypto.randomUUID(),
-      threadId,
-      projectId: project.project_id,
-      title,
-      modelSelection,
-      runtimeMode,
-      interactionMode,
-      branch: thread?.branch ?? null,
-      worktreePath: thread?.worktree_path ?? null,
-      createdAt: new Date().toISOString(),
-    });
-  } catch (e) {
-    deleteRuntimeRow(threadId);
-    unlinkSync(dstPath);
-    rmSync(join(dirname(srcPath), newSessionId), { recursive: true, force: true });
-    throw e;
+    const ticket = await wsTicket(origin, issued.token);
+    // scan refreshes the importer's transcript cache so it sees the new file
+    await rpcCall(origin, ticket, "agentSessions.scan", {});
+    const others = otherEligibleSessions(project.workspace_root, dstPath);
+    const before = visibleImportThreadIds();
+    removeBlockers();
+    const blockers = insertBlockers(others);
+    let result: { importedCount: number; skippedCount: number };
+    try {
+      result = await rpcCall(origin, await wsTicket(origin, issued.token), "agentSessions.import", {
+        projectId: project.project_id,
+        expectedWorkspaceRoot: project.workspace_root,
+      });
+    } finally {
+      removeBlockers();
+    }
+    // safety net: the importer is all-or-nothing, remove anything it created besides our copy
+    const unexpected = [...visibleImportThreadIds()].filter((id) => id !== newThreadId && !before.has(id));
+    for (const id of unexpected) {
+      console.error(`warning: importer also created ${id}; deleting it`);
+      await dispatch(origin, issued.token, { type: "thread.delete", commandId: crypto.randomUUID(), threadId: id });
+    }
+    const summary = importedThreadSummary(newThreadId);
+    if (!summary) {
+      unlinkSync(dstPath);
+      rmSync(join(dirname(srcPath), newSessionId), { recursive: true, force: true });
+      fail(`t3 did not import the copy (imported ${result.importedCount}, skipped ${result.skippedCount}); copy removed`);
+    }
+    console.log(`thread:   ${newThreadId}`);
+    console.log(`          ${summary.messages} messages shown, ${blockers.length} other transcripts shielded, ${result.skippedCount} skipped by t3`);
   } finally {
     revokeToken(app, issued);
   }
 
-  console.log(`thread:   ${threadId}`);
-  console.log("done. the new thread is in the t3 sidebar; its first message continues the copied conversation.");
-  console.log("note: t3 shows the copied history only in the original thread. the model still has the full context.");
+  console.log("done. the new thread is in the t3 sidebar with its history; its first message continues the copied conversation.");
 }
 
 await main();
