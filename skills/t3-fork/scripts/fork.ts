@@ -706,6 +706,9 @@ async function main() {
       await dispatch(origin, issued.token, { type: "thread.delete", commandId: crypto.randomUUID(), threadId: id });
     }
     const summary = importedThreadSummary(newThreadId);
+    // the importer marks threads as settled, which hides them in the sidebar's
+    // collapsed "settled" group; unsettle so the fork shows up with active threads
+    if (summary) await dispatch(origin, issued.token, { type: "thread.unsettle", commandId: crypto.randomUUID(), threadId: newThreadId, reason: "user" });
     if (!summary) {
       unlinkSync(dstPath);
       rmSync(join(dirname(srcPath), newSessionId), { recursive: true, force: true });

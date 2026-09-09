@@ -46,6 +46,6 @@ bun run <skill-dir>/scripts/fork.ts --current --dry-run
 
 ## Limits
 
-- The new thread shows user and assistant text only (no tool calls), capped by T3 at 200 messages. Its id is `import:claudeAgent:<session>`, runtime mode is full-access, and the model comes from the transcript.
+- The new thread shows user and assistant text only (no tool calls), capped by T3 at 200 messages. The importer marks it settled; the script unsettles it so it appears with active threads. Its id is `import:claudeAgent:<session>`, runtime mode is full-access, and the model comes from the transcript.
 - The shield relies on T3 importer internals (it skips transcripts whose runtime binding has a foreign provider instance). A safety net deletes any thread the importer still creates besides the copy. If T3 changes the importer, check the server log for "Could not import an agent session" warnings, which are expected during a fork.
 - macOS only: it runs the T3 server CLI from `/Applications/T3 Code*.app` to issue a short-lived bearer token.
