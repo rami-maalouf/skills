@@ -1,6 +1,7 @@
 ---
 name: t3-fork
-description: Fork, branch, or duplicate a T3 Code conversation into a new thread that keeps the full context. Use when the user says "fork this conversation", "branch this chat", "duplicate this thread", "copy this conversation to a new thread", or wants to try a different direction without losing the current one. Also handles branching from an earlier point ("fork from turn 3").
+description: Fork, branch, or duplicate a T3 Code conversation into a new thread that keeps the full context, with an option to keep only the first or last N turns. Manual only, run with /t3-fork; it does not trigger itself.
+disable-model-invocation: true
 ---
 
 # t3-fork
