@@ -1,6 +1,6 @@
 # skills
 
-Rami's collection of Claude Code skills, plus the agent config (Claude Code, Codex,
+Rami's collection of Agent skills, plus the agent config (Claude Code, Codex,
 Gemini) that ties them together. Each skill is a self-contained directory with a
 `SKILL.md` that tells an agent when and how to use it, and an optional `scripts/`
 folder with the code it runs.
