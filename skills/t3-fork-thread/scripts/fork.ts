@@ -1,0 +1,504 @@
+#!/usr/bin/env bun
+// fork (branch) or duplicate a t3 code conversation.
+//
+// how it works:
+//   1. resolve the claude code session behind a t3 thread (t3 keeps the
+//      session id in provider_session_runtime.resume_cursor_json).
+//   2. copy the session transcript (~/.claude/projects/<slug>/<id>.jsonl)
+//      to a new session id, optionally cut after the n-th user turn.
+//   3. register a new t3 thread that resumes the copied session: create the
+//      thread through t3's http dispatch api and bind the runtime row the
+//      same way t3's own transcript importer does.
+//
+// usage:
+//   bun run fork.ts [--current | --thread <t3-thread-id> | --session <claude-session-id>]
+//                   [--list] [--up-to <n>] [--title <text>] [--no-register] [--dry-run]
+
+import { Database } from "bun:sqlite";
+import { existsSync, mkdirSync, readdirSync, statSync, cpSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const HOME = homedir();
+const T3_HOME = process.env.T3CODE_HOME ?? join(HOME, ".t3");
+const T3_DB = join(T3_HOME, "userdata", "state.sqlite");
+const T3_RUNTIME = join(T3_HOME, "userdata", "server-runtime.json");
+const CLAUDE_PROJECTS = join(HOME, ".claude", "projects");
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+type Args = {
+  current: boolean;
+  thread?: string;
+  session?: string;
+  list: boolean;
+  upTo?: number;
+  title?: string;
+  register: boolean;
+  dryRun: boolean;
+};
+
+function usage(exit = 0): never {
+  console.log(`fork a t3 code conversation into a new thread
+
+usage: bun run fork.ts [source] [options]
+
+source (default: --current):
+  --current             the conversation this script runs inside (walks the parent
+                        claude process for --session-id / --resume), else the only
+                        running t3 thread for the current directory
+  --thread <id>         a t3 thread id
+  --session <uuid>      a claude code session id
+
+options:
+  --list                print the user turns of the source and exit
+  --up-to <n>           keep only the first n user turns (branch point)
+  --title <text>        title for the new thread (default: "<source title> (fork)")
+  --no-register         only write the transcript copy, do not create a t3 thread
+  --dry-run             print what would happen, change nothing
+  -h, --help            show this help`);
+  process.exit(exit);
+}
+
+function parseArgs(argv: string[]): Args {
+  const args: Args = { current: false, list: false, register: true, dryRun: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const next = () => {
+      const v = argv[++i];
+      if (v === undefined) fail(`missing value for ${a}`);
+      return v;
+    };
+    switch (a) {
+      case "--current": args.current = true; break;
+      case "--thread": args.thread = next(); break;
+      case "--session": args.session = next(); break;
+      case "--list": args.list = true; break;
+      case "--up-to": {
+        const n = Number(next());
+        if (!Number.isInteger(n) || n < 1) fail("--up-to expects a positive integer");
+        args.upTo = n;
+        break;
+      }
+      case "--title": args.title = next(); break;
+      case "--no-register": args.register = false; break;
+      case "--dry-run": args.dryRun = true; break;
+      case "-h": case "--help": usage();
+      default: fail(`unknown argument: ${a}`);
+    }
+  }
+  const sources = [args.current, !!args.thread, !!args.session].filter(Boolean).length;
+  if (sources > 1) fail("pick one of --current, --thread, --session");
+  if (sources === 0) args.current = true;
+  return args;
+}
+
+function fail(msg: string): never {
+  console.error(`error: ${msg}`);
+  process.exit(1);
+}
+
+// ---------- t3 state (read-only) ----------
+
+type ThreadRow = {
+  thread_id: string;
+  project_id: string;
+  title: string;
+  branch: string | null;
+  worktree_path: string | null;
+  runtime_mode: string;
+  interaction_mode: string;
+  model_selection_json: string | null;
+  workspace_root: string;
+  session_id: string | null;
+  status: string | null;
+  cwd: string | null;
+};
+
+function openReadOnly(): Database {
+  if (!existsSync(T3_DB)) fail(`t3 state database not found at ${T3_DB}`);
+  return new Database(T3_DB, { readonly: true });
+}
+
+const THREAD_SELECT = `
+  select t.thread_id, t.project_id, t.title, t.branch, t.worktree_path,
+         t.runtime_mode, t.interaction_mode, t.model_selection_json,
+         p.workspace_root,
+         json_extract(r.resume_cursor_json, '$.resume') as session_id,
+         r.status,
+         json_extract(r.runtime_payload_json, '$.cwd') as cwd
+  from projection_threads t
+  join projection_projects p on p.project_id = t.project_id
+  left join provider_session_runtime r on r.thread_id = t.thread_id
+  where t.deleted_at is null`;
+
+function threadById(db: Database, threadId: string): ThreadRow | null {
+  return db.query<ThreadRow, [string]>(`${THREAD_SELECT} and t.thread_id = ?`).get(threadId);
+}
+
+function threadBySession(db: Database, sessionId: string): ThreadRow | null {
+  return db.query<ThreadRow, [string]>(`${THREAD_SELECT} and json_extract(r.resume_cursor_json, '$.resume') = ?`).get(sessionId);
+}
+
+function runningThreadsForCwd(db: Database, cwd: string): ThreadRow[] {
+  return db
+    .query<ThreadRow, [string]>(`${THREAD_SELECT} and r.status = 'running' and json_extract(r.runtime_payload_json, '$.cwd') = ? order by t.updated_at desc`)
+    .all(cwd);
+}
+
+function projectForWorkspace(db: Database, workspaceRoot: string): { project_id: string; workspace_root: string } | null {
+  return db
+    .query<{ project_id: string; workspace_root: string }, [string]>(
+      `select project_id, workspace_root from projection_projects where deleted_at is null and workspace_root = ?`,
+    )
+    .get(workspaceRoot);
+}
+
+// ---------- current session detection ----------
+
+function sessionFromParentProcesses(): string | null {
+  let pid = process.ppid;
+  for (let depth = 0; depth < 8 && pid > 1; depth++) {
+    const out = spawnSync("ps", ["-o", "ppid=,command=", "-p", String(pid)], { encoding: "utf8" });
+    if (out.status !== 0) return null;
+    const line = out.stdout.trim();
+    if (!line) return null;
+    const m = line.match(/^\s*(\d+)\s+(.*)$/s);
+    if (!m) return null;
+    const command = m[2];
+    if (/(^|\/)claude(\s|$)/.test(command) || command.includes("claude ")) {
+      const flag = command.match(/--(?:session-id|resume)[= ]([0-9a-f-]{36})/i);
+      if (flag) return flag[1].toLowerCase();
+    }
+    pid = Number(m[1]);
+  }
+  return null;
+}
+
+// ---------- transcript handling ----------
+
+function findTranscript(sessionId: string): string {
+  if (!existsSync(CLAUDE_PROJECTS)) fail(`claude projects directory not found at ${CLAUDE_PROJECTS}`);
+  for (const dir of readdirSync(CLAUDE_PROJECTS)) {
+    const candidate = join(CLAUDE_PROJECTS, dir, `${sessionId}.jsonl`);
+    if (existsSync(candidate)) return candidate;
+  }
+  fail(`no transcript found for session ${sessionId} under ${CLAUDE_PROJECTS}`);
+}
+
+type Record = { [key: string]: any };
+
+function readTranscript(path: string): Record[] {
+  const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim().length > 0);
+  return lines.map((line, i) => {
+    try {
+      return JSON.parse(line) as Record;
+    } catch {
+      fail(`could not parse line ${i + 1} of ${path}`);
+    }
+  });
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => b && typeof b === "object" && b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text)
+    .join(" ")
+    .trim();
+}
+
+function isToolResultOnly(content: unknown): boolean {
+  return Array.isArray(content) && content.length > 0 && content.every((b) => b && typeof b === "object" && b.type === "tool_result");
+}
+
+// a user turn is a real prompt from the human: not a tool result, not meta, not a sidechain
+function isUserTurn(r: Record): boolean {
+  if (r.type !== "user") return false;
+  if (r.isMeta === true || r.isSidechain === true || r.isCompactSummary === true) return false;
+  const content = r.message?.content;
+  if (isToolResultOnly(content)) return false;
+  return textOf(content).length > 0;
+}
+
+function userTurnIndices(records: Record[]): number[] {
+  const out: number[] = [];
+  records.forEach((r, i) => {
+    if (isUserTurn(r)) out.push(i);
+  });
+  return out;
+}
+
+function transcriptTitle(records: Record[]): string | null {
+  let title: string | null = null;
+  for (const r of records) if (typeof r.aiTitle === "string" && r.aiTitle.trim()) title = r.aiTitle.trim();
+  return title;
+}
+
+function transcriptCwd(records: Record[]): string | null {
+  for (const r of records) if (typeof r.cwd === "string" && r.cwd.trim()) return r.cwd.trim();
+  return null;
+}
+
+function rewriteSessionId(records: Record[], from: string, to: string, title: string | null): Record[] {
+  return records.map((r) => {
+    const copy = { ...r };
+    if (copy.sessionId === from) copy.sessionId = to;
+    if (title !== null && copy.type === "ai-title" && typeof copy.aiTitle === "string") copy.aiTitle = title;
+    return copy;
+  });
+}
+
+function writeTranscript(path: string, records: Record[]): void {
+  writeFileSync(path, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
+// subagent transcripts live in <session-id>/subagents/*.jsonl next to the transcript
+function copySessionDir(srcDir: string, dstDir: string, from: string, to: string): boolean {
+  if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) return false;
+  cpSync(srcDir, dstDir, { recursive: true });
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const p = join(dir, entry);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (p.endsWith(".jsonl")) writeFileSync(p, readFileSync(p, "utf8").replaceAll(`"sessionId":"${from}"`, `"sessionId":"${to}"`));
+    }
+  };
+  walk(dstDir);
+  return true;
+}
+
+// ---------- t3 registration ----------
+
+function findT3App(): string {
+  const apps = readdirSync("/Applications").filter((n) => /^T3 Code.*\.app$/.test(n));
+  if (apps.length === 0) fail("t3 code app not found in /Applications");
+  return join("/Applications", apps[0]);
+}
+
+function t3Cli(app: string, args: string[]): string {
+  const bin = join(app, "Contents", "MacOS", basename(app, ".app"));
+  const script = join(app, "Contents", "Resources", "app.asar", "apps", "server", "dist", "bin.mjs");
+  const out = spawnSync(bin, [script, ...args], { encoding: "utf8", env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" } });
+  if (out.status !== 0) fail(`t3 cli failed (${args.slice(0, 3).join(" ")}): ${out.stderr.trim()}`);
+  return out.stdout;
+}
+
+type Issued = { token: string; sessionId: string };
+
+function issueToken(app: string): Issued {
+  const raw = t3Cli(app, ["auth", "session", "issue", "--base-dir", T3_HOME, "--json", "--ttl", "5m", "--label", "t3-fork-thread"]);
+  const parsed = JSON.parse(raw);
+  const token: string | undefined = parsed.token ?? parsed.bearerToken ?? parsed.accessToken;
+  const sessionId: string | undefined = parsed.sessionId ?? parsed.session?.sessionId;
+  if (!token || !sessionId) fail("unexpected output from t3 auth session issue");
+  return { token, sessionId };
+}
+
+function revokeToken(app: string, issued: Issued): void {
+  try {
+    t3Cli(app, ["auth", "session", "revoke", "--base-dir", T3_HOME, issued.sessionId]);
+  } catch {
+    // best effort: the token expires on its own after 5 minutes
+  }
+}
+
+function serverOrigin(): string {
+  if (!existsSync(T3_RUNTIME)) fail(`t3 code does not look like it is running (${T3_RUNTIME} missing)`);
+  const rt = JSON.parse(readFileSync(T3_RUNTIME, "utf8"));
+  if (typeof rt.origin !== "string") fail("could not read server origin from server-runtime.json");
+  return rt.origin;
+}
+
+async function dispatch(origin: string, token: string, command: Record): Promise<Record> {
+  const res = await fetch(`${origin}/api/orchestration/dispatch`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(command),
+  });
+  const text = await res.text();
+  if (!res.ok) fail(`t3 dispatch ${command.type} failed (${res.status}): ${text}`);
+  return text ? JSON.parse(text) : {};
+}
+
+function insertRuntimeRow(input: {
+  threadId: string;
+  sessionId: string;
+  cwd: string;
+  runtimeMode: string;
+  model: unknown;
+  modelSelection: unknown;
+}): void {
+  const db = new Database(T3_DB);
+  try {
+    db.exec("pragma busy_timeout = 5000");
+    db.query(
+      `insert into provider_session_runtime
+         (thread_id, provider_name, provider_instance_id, adapter_key, runtime_mode, status, last_seen_at, resume_cursor_json, runtime_payload_json)
+       values (?, 'claudeAgent', 'claudeAgent', 'claudeAgent', ?, 'stopped', ?, ?, ?)
+       on conflict (thread_id) do nothing`,
+    ).run(
+      input.threadId,
+      input.runtimeMode,
+      new Date().toISOString(),
+      JSON.stringify({ threadId: input.threadId, resume: input.sessionId, turnCount: 0 }),
+      JSON.stringify({ cwd: input.cwd, model: input.model, modelSelection: input.modelSelection }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function deleteRuntimeRow(threadId: string): void {
+  const db = new Database(T3_DB);
+  try {
+    db.exec("pragma busy_timeout = 5000");
+    db.query(`delete from provider_session_runtime where thread_id = ?`).run(threadId);
+  } finally {
+    db.close();
+  }
+}
+
+// ---------- main ----------
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const db = openReadOnly();
+
+  // 1. resolve the source session and (if any) its t3 thread
+  let sessionId: string;
+  let thread: ThreadRow | null = null;
+  if (args.session) {
+    if (!UUID_RE.test(args.session)) fail("--session expects a uuid");
+    sessionId = args.session.toLowerCase();
+    thread = threadBySession(db, sessionId);
+  } else if (args.thread) {
+    thread = threadById(db, args.thread);
+    if (!thread) fail(`t3 thread ${args.thread} not found`);
+    if (!thread.session_id) fail(`t3 thread ${args.thread} has no claude session yet (send one message first)`);
+    sessionId = thread.session_id;
+  } else {
+    const fromProcess = sessionFromParentProcesses();
+    if (fromProcess) {
+      sessionId = fromProcess;
+      thread = threadBySession(db, sessionId);
+    } else {
+      const running = runningThreadsForCwd(db, process.cwd());
+      if (running.length === 0) fail(`no running t3 thread found for ${process.cwd()}; pass --thread or --session`);
+      if (running.length > 1) {
+        console.error("several running t3 threads for this directory, pass --thread <id>:");
+        for (const t of running) console.error(`  ${t.thread_id}  ${t.title}`);
+        process.exit(1);
+      }
+      thread = running[0];
+      if (!thread.session_id) fail(`t3 thread ${thread.thread_id} has no claude session yet`);
+      sessionId = thread.session_id;
+    }
+  }
+
+  const srcPath = findTranscript(sessionId);
+  const records = readTranscript(srcPath);
+  const turns = userTurnIndices(records);
+  const sourceTitle = thread?.title ?? transcriptTitle(records) ?? "untitled";
+
+  if (args.list) {
+    console.log(`source: ${sourceTitle}`);
+    console.log(`session: ${sessionId}`);
+    if (thread) console.log(`thread:  ${thread.thread_id}`);
+    console.log(`user turns: ${turns.length}`);
+    turns.forEach((idx, n) => {
+      const r = records[idx];
+      const when = typeof r.timestamp === "string" ? r.timestamp.replace("T", " ").slice(0, 16) : "";
+      const text = textOf(r.message?.content).replace(/\s+/g, " ");
+      console.log(`  ${String(n + 1).padStart(3)}  ${when}  ${text.length > 90 ? text.slice(0, 90) + "..." : text}`);
+    });
+    return;
+  }
+
+  if (turns.length === 0) fail("the source conversation has no user turns yet");
+  if (args.upTo !== undefined && args.upTo > turns.length) fail(`--up-to ${args.upTo} exceeds the ${turns.length} user turns in the source`);
+
+  // 2. build the copy
+  const cut = args.upTo !== undefined && args.upTo < turns.length ? turns[args.upTo] : records.length;
+  const keptTurns = args.upTo ?? turns.length;
+  const newSessionId = crypto.randomUUID();
+  const title = args.title ?? `${sourceTitle} (fork)`;
+  const dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
+  const forked = rewriteSessionId(records.slice(0, cut), sessionId, newSessionId, title);
+
+  // 3. figure out where the t3 thread goes
+  const workspaceRoot = thread?.workspace_root ?? transcriptCwd(records);
+  const cwd = thread?.cwd ?? transcriptCwd(records) ?? workspaceRoot;
+  const project = thread ? { project_id: thread.project_id, workspace_root: thread.workspace_root } : workspaceRoot ? projectForWorkspace(db, workspaceRoot) : null;
+  db.close();
+
+  console.log(`source:   ${sourceTitle}`);
+  console.log(`          session ${sessionId}${thread ? `, thread ${thread.thread_id}` : " (not bound to a t3 thread)"}`);
+  console.log(`copy:     ${keptTurns}/${turns.length} user turns, ${forked.length}/${records.length} records`);
+  console.log(`          ${dstPath}`);
+  console.log(`title:    ${title}`);
+
+  if (!args.register) {
+    console.log("register: skipped (--no-register)");
+  } else if (!project) {
+    fail(`no t3 project matches workspace root ${workspaceRoot ?? "(unknown)"}; add the project in t3 or use --no-register`);
+  } else {
+    console.log(`project:  ${project.workspace_root}`);
+  }
+
+  if (args.dryRun) {
+    console.log("dry run: nothing written");
+    return;
+  }
+
+  writeTranscript(dstPath, forked);
+  const copiedDir = copySessionDir(join(dirname(srcPath), sessionId), join(dirname(srcPath), newSessionId), sessionId, newSessionId);
+  if (copiedDir) console.log(`          copied subagent transcripts`);
+
+  if (!args.register || !project) {
+    console.log(`done. resume it with: claude --resume ${newSessionId}`);
+    return;
+  }
+
+  // 4. register the new thread in t3
+  const modelSelection = thread?.model_selection_json ? JSON.parse(thread.model_selection_json) : { instanceId: "claudeAgent", model: "claude-fable-5-1" };
+  const runtimeMode = thread?.runtime_mode ?? "full-access";
+  const interactionMode = thread?.interaction_mode ?? "default";
+  const threadId = crypto.randomUUID();
+  const app = findT3App();
+  const origin = serverOrigin();
+
+  // the runtime row must exist before the first turn so t3 resumes instead of starting fresh
+  insertRuntimeRow({ threadId, sessionId: newSessionId, cwd: cwd ?? project.workspace_root, runtimeMode, model: modelSelection.model, modelSelection });
+
+  const issued = issueToken(app);
+  try {
+    await dispatch(origin, issued.token, {
+      type: "thread.create",
+      commandId: crypto.randomUUID(),
+      threadId,
+      projectId: project.project_id,
+      title,
+      modelSelection,
+      runtimeMode,
+      interactionMode,
+      branch: thread?.branch ?? null,
+      worktreePath: thread?.worktree_path ?? null,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    deleteRuntimeRow(threadId);
+    unlinkSync(dstPath);
+    rmSync(join(dirname(srcPath), newSessionId), { recursive: true, force: true });
+    throw e;
+  } finally {
+    revokeToken(app, issued);
+  }
+
+  console.log(`thread:   ${threadId}`);
+  console.log("done. the new thread is in the t3 sidebar; its first message continues the copied conversation.");
+  console.log("note: t3 shows the copied history only in the original thread. the model still has the full context.");
+}
+
+await main();
