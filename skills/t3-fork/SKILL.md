@@ -1,9 +1,9 @@
 ---
-name: t3-fork-thread
+name: t3-fork
 description: Fork, branch, or duplicate a T3 Code conversation into a new thread that keeps the full context. Use when the user says "fork this conversation", "branch this chat", "duplicate this thread", "copy this conversation to a new thread", or wants to try a different direction without losing the current one. Also handles branching from an earlier point ("fork from turn 3").
 ---
 
-# t3-fork-thread
+# t3-fork
 
 Creates a new T3 Code thread whose Claude Code session is a copy of an existing conversation. The new thread starts with the full prior context. Optionally cut the copy after the n-th user turn to branch from an earlier point.
 

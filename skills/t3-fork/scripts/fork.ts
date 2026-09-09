@@ -288,7 +288,7 @@ function t3Cli(app: string, args: string[]): string {
 type Issued = { token: string; sessionId: string };
 
 function issueToken(app: string): Issued {
-  const raw = t3Cli(app, ["auth", "session", "issue", "--base-dir", T3_HOME, "--json", "--ttl", "5m", "--label", "t3-fork-thread"]);
+  const raw = t3Cli(app, ["auth", "session", "issue", "--base-dir", T3_HOME, "--json", "--ttl", "5m", "--label", "t3-fork"]);
   const parsed = JSON.parse(raw);
   const token: string | undefined = parsed.token ?? parsed.bearerToken ?? parsed.accessToken;
   const sessionId: string | undefined = parsed.sessionId ?? parsed.session?.sessionId;
