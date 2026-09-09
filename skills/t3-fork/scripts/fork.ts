@@ -14,7 +14,7 @@
 //
 // usage:
 //   bun run fork.ts [--current | --thread <t3-thread-id> | --session <claude-session-id>]
-//                   [--list] [--up-to <n>] [--title <text>] [--no-register] [--dry-run]
+//                   [--list] [--first <n> | --last <n>] [--title <text>] [--no-register] [--dry-run]
 
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, statSync, cpSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
@@ -34,7 +34,8 @@ type Args = {
   thread?: string;
   session?: string;
   list: boolean;
-  upTo?: number;
+  first?: number;
+  last?: number;
   title?: string;
   register: boolean;
   dryRun: boolean;
@@ -55,7 +56,10 @@ source (default: --current):
 
 options:
   --list                print the user turns of the source and exit
-  --up-to <n>           keep only the first n user turns (branch point)
+  --first <n>           keep only the first n user turns, counting from the
+                        start (branch point)
+  --last <n>            keep only the last n user turns, counting from the end.
+                        the new thread has no memory of anything before them
   --title <text>        title for the new thread (default: "<source title> (fork)")
   --no-register         only write the transcript copy, do not create a t3 thread
   --include-trigger     with --current, keep the last user turn (the message that
@@ -68,6 +72,11 @@ options:
 
 function parseArgs(argv: string[]): Args {
   const args: Args = { current: false, list: false, register: true, dryRun: false, includeTrigger: false };
+  const parseCount = (flag: string, value: string): number => {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 1) fail(`${flag} expects a positive integer`);
+    return n;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -80,12 +89,8 @@ function parseArgs(argv: string[]): Args {
       case "--thread": args.thread = next(); break;
       case "--session": args.session = next(); break;
       case "--list": args.list = true; break;
-      case "--up-to": {
-        const n = Number(next());
-        if (!Number.isInteger(n) || n < 1) fail("--up-to expects a positive integer");
-        args.upTo = n;
-        break;
-      }
+      case "--first": args.first = parseCount(a, next()); break;
+      case "--last": args.last = parseCount(a, next()); break;
       case "--title": args.title = next(); break;
       case "--no-register": args.register = false; break;
       case "--include-trigger": args.includeTrigger = true; break;
@@ -97,6 +102,7 @@ function parseArgs(argv: string[]): Args {
   const sources = [args.current, !!args.thread, !!args.session].filter(Boolean).length;
   if (sources > 1) fail("pick one of --current, --thread, --session");
   if (sources === 0) args.current = true;
+  if (args.first !== undefined && args.last !== undefined) fail("pick one of --first, --last");
   return args;
 }
 
@@ -638,25 +644,39 @@ async function main() {
   }
 
   if (turns.length === 0) fail("the source conversation has no user turns yet");
-  if (args.upTo !== undefined && args.upTo > turns.length) fail(`--up-to ${args.upTo} exceeds the ${turns.length} user turns in the source`);
+  if (args.first !== undefined && args.first > turns.length) fail(`--first ${args.first} exceeds the ${turns.length} user turns in the source`);
+  if (args.last !== undefined && args.last > turns.length) fail(`--last ${args.last} exceeds the ${turns.length} user turns in the source`);
 
   // when forking the live conversation, its own last turn is the command that
   // triggered this fork (e.g. "/t3-fork"). drop it by default so the new
   // thread does not start with a copy of that invocation.
-  let upTo = args.upTo;
+  let first = args.first;
   let droppedTrigger = false;
-  if (upTo === undefined && args.current && !args.includeTrigger && turns.length > 1) {
-    upTo = turns.length - 1;
+  if (first === undefined && args.last === undefined && args.current && !args.includeTrigger && turns.length > 1) {
+    first = turns.length - 1;
     droppedTrigger = true;
   }
 
-  // 2. build the copy
-  const cut = upTo !== undefined && upTo < turns.length ? turns[upTo] : records.length;
-  const keptTurns = upTo ?? turns.length;
+  // 2. build the copy: --first keeps a prefix (records already start at the
+  // session's real beginning, so the parent chain is intact); --last keeps a
+  // suffix and needs its first record's parent link cleared, since that
+  // parent falls outside the slice.
+  let rawSlice: Record[];
+  let keptTurns: number;
+  if (args.last !== undefined) {
+    const startTurn = turns.length - args.last;
+    rawSlice = records.slice(turns[startTurn]);
+    if (rawSlice.length > 0 && "parentUuid" in rawSlice[0]) rawSlice[0] = { ...rawSlice[0], parentUuid: null };
+    keptTurns = args.last;
+  } else {
+    const cut = first !== undefined && first < turns.length ? turns[first] : records.length;
+    rawSlice = records.slice(0, cut);
+    keptTurns = first ?? turns.length;
+  }
   const newSessionId = crypto.randomUUID();
   const title = args.title ?? `${sourceTitle} (fork)`;
   const dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
-  const forked = rewriteSessionId(records.slice(0, cut), sessionId, newSessionId, title);
+  const forked = rewriteSessionId(rawSlice, sessionId, newSessionId, title);
 
   // 3. figure out where the t3 thread goes
   const workspaceRoot = thread?.workspace_root ?? transcriptCwd(records);
@@ -666,7 +686,8 @@ async function main() {
 
   console.log(`source:   ${sourceTitle}`);
   console.log(`          session ${sessionId}${thread ? `, thread ${thread.thread_id}` : " (not bound to a t3 thread)"}`);
-  console.log(`copy:     ${keptTurns}/${turns.length} user turns, ${forked.length}/${records.length} records${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
+  const rangeNote = args.last !== undefined ? " (last)" : "";
+  console.log(`copy:     ${keptTurns}/${turns.length} user turns${rangeNote}, ${forked.length}/${records.length} records${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
   console.log(`          ${dstPath}`);
   console.log(`title:    ${title}`);
 
