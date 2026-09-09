@@ -38,6 +38,7 @@ type Args = {
   title?: string;
   register: boolean;
   dryRun: boolean;
+  includeTrigger: boolean;
 };
 
 function usage(exit = 0): never {
@@ -57,13 +58,16 @@ options:
   --up-to <n>           keep only the first n user turns (branch point)
   --title <text>        title for the new thread (default: "<source title> (fork)")
   --no-register         only write the transcript copy, do not create a t3 thread
+  --include-trigger     with --current, keep the last user turn (the message that
+                        ran this command). by default it is dropped so the fork
+                        does not start with its own invocation
   --dry-run             print what would happen, change nothing
   -h, --help            show this help`);
   process.exit(exit);
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { current: false, list: false, register: true, dryRun: false };
+  const args: Args = { current: false, list: false, register: true, dryRun: false, includeTrigger: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const next = () => {
@@ -84,6 +88,7 @@ function parseArgs(argv: string[]): Args {
       }
       case "--title": args.title = next(); break;
       case "--no-register": args.register = false; break;
+      case "--include-trigger": args.includeTrigger = true; break;
       case "--dry-run": args.dryRun = true; break;
       case "-h": case "--help": usage();
       default: fail(`unknown argument: ${a}`);
@@ -635,9 +640,19 @@ async function main() {
   if (turns.length === 0) fail("the source conversation has no user turns yet");
   if (args.upTo !== undefined && args.upTo > turns.length) fail(`--up-to ${args.upTo} exceeds the ${turns.length} user turns in the source`);
 
+  // when forking the live conversation, its own last turn is the command that
+  // triggered this fork (e.g. "/t3-fork"). drop it by default so the new
+  // thread does not start with a copy of that invocation.
+  let upTo = args.upTo;
+  let droppedTrigger = false;
+  if (upTo === undefined && args.current && !args.includeTrigger && turns.length > 1) {
+    upTo = turns.length - 1;
+    droppedTrigger = true;
+  }
+
   // 2. build the copy
-  const cut = args.upTo !== undefined && args.upTo < turns.length ? turns[args.upTo] : records.length;
-  const keptTurns = args.upTo ?? turns.length;
+  const cut = upTo !== undefined && upTo < turns.length ? turns[upTo] : records.length;
+  const keptTurns = upTo ?? turns.length;
   const newSessionId = crypto.randomUUID();
   const title = args.title ?? `${sourceTitle} (fork)`;
   const dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
@@ -651,7 +666,7 @@ async function main() {
 
   console.log(`source:   ${sourceTitle}`);
   console.log(`          session ${sessionId}${thread ? `, thread ${thread.thread_id}` : " (not bound to a t3 thread)"}`);
-  console.log(`copy:     ${keptTurns}/${turns.length} user turns, ${forked.length}/${records.length} records`);
+  console.log(`copy:     ${keptTurns}/${turns.length} user turns, ${forked.length}/${records.length} records${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
   console.log(`          ${dstPath}`);
   console.log(`title:    ${title}`);
 
