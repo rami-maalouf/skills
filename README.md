@@ -6,8 +6,8 @@ Gemini) that ties them together. Each skill is a self-contained directory with a
 folder with the code it runs.
 
 Most of these skills are built around Rami's own tools and context (his Obsidian
-vault, his Letterly account, his voice, his immigration situation). A few are
-general-purpose and useful as-is or as a reference for writing your own:
+vault, his Letterly account, his voice). A few are general-purpose and useful
+as-is or as a reference for writing your own:
 `t3-fork`, `cmux-and-worktrees`, `co-ceo`, `thought-partner`, `communication-analysis`.
 
 ## Install
