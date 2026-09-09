@@ -12,39 +12,23 @@ as-is or as a reference for writing your own:
 
 ## Install
 
-Requires `git` and `bash`. Some skills also need `bun` or `uv` — each skill's
-`SKILL.md` says so.
-
-**From a clone:**
-
-```bash
-git clone https://github.com/rami-maalouf/skills.git
-cd skills
-./install.sh --list                 # see everything available
-./install.sh t3-fork                # install one skill
-./install.sh t3-fork thought-partner # install several
-./install.sh --all                  # install everything
-```
-
-**Without cloning:**
+Install with the [`skills` CLI](https://skills.sh) (`npx skills`), the open
+agent-skills package manager. Some skills also need `bun` or `uv` at
+runtime — each skill's `SKILL.md` says so.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rami-maalouf/skills/main/install.sh | bash -s -- t3-fork
+npx skills add rami-maalouf/skills --list          # see everything available
+npx skills add rami-maalouf/skills -s t3-fork      # install one skill, project-local
+npx skills add rami-maalouf/skills -s t3-fork -g   # install it globally instead
+npx skills add rami-maalouf/skills --all           # install everything
 ```
 
-This caches a clone under `~/.cache/rami-skills` and keeps it updated on
-later runs. Override with `SKILLS_HOME=/some/dir`.
-
-By default, `install.sh` symlinks each skill into `~/.claude/skills/<name>` —
-Claude Code's global skills directory. Since it's a symlink, `git pull` in the
-repo (or in the cache dir, if you used the one-liner) updates the skill in
-place; no need to reinstall. Pass `--copy` for a self-contained copy instead,
-or `--target DIR` to install somewhere else, e.g. a project's `.claude/skills`:
-
-```bash
-./install.sh --target ./.claude/skills t3-fork   # project-local, not global
-./install.sh --copy t3-fork                      # a copy, not a symlink
-```
+`-g`/`--global` installs into `~/.claude/skills/<name>` (available in every
+project); without it, the skill goes into `./.claude/skills/<name>` for the
+current project only. `-a <agent>` targets a specific agent (`-a claude-code`,
+or `-a '*'` for all supported agents) if you're not using Claude Code.
+Installed skills and their source are tracked in `skills-lock.json`, which
+`npx skills update` reads to pull in changes from this repo.
 
 ## Example: installing `t3-fork`
 
@@ -53,12 +37,12 @@ conversation into a new thread with the full prior context, optionally
 branching from an earlier turn.
 
 ```bash
-$ ./install.sh t3-fork
-installed t3-fork -> /Users/rami/.claude/skills/t3-fork
-  note: T3 Code must be running. Requires `bun`.
+$ npx skills add rami-maalouf/skills -s t3-fork -g
 
-done: 1 skill(s) installed into /Users/rami/.claude/skills
-these are symlinks into /Users/rami/Documents/life-os/ai-agents-config/skills - a git pull there updates them in place.
+◇  Installed 1 skill ────────────╮
+│  ✓ t3-fork (copied)            │
+│    → ~/.claude/skills/t3-fork  │
+╰────────────────────────────────╯
 ```
 
 Once installed, it shows up as `/t3-fork` in Claude Code. Typing `/t3-fork`, or
@@ -72,9 +56,8 @@ skills/<name>/scripts/       optional — the code the skill runs
 skill-collections/           bundles of skills grouped for a specific workspace
 claude-code/, codex/, gemini/  shared agent config for each CLI
 AGENTS.md, global_instructions.md   cross-agent behavior rules
-install.sh                   the installer above
 setup_symlinks.sh            Rami's personal machine bootstrap (hardcoded paths;
-                              not meant for other machines — use install.sh instead)
+                              not meant for other machines — use the skills CLI above instead)
 ```
 
 ## Writing a new skill
@@ -93,5 +76,9 @@ Instructions for the agent, in plain language.
 Keep the description specific about trigger phrases — it is the only thing an
 agent sees before deciding whether to open the skill. Put any code the skill
 needs under `scripts/`, and note its runtime requirements (`bun`, `uv`, a
-running app, etc.) directly in `SKILL.md` so `install.sh`'s "note:" line and
-anyone reading the file catch it up front.
+running app, etc.) directly in `SKILL.md` so anyone reading the file catches
+it up front.
+
+Keep the frontmatter `description` to a single plain-text line without an
+unescaped `:` — the `skills` CLI parses it as YAML and a bare colon inside the
+text breaks that parse, silently dropping the skill from `--list`.

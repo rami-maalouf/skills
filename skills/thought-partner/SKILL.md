@@ -1,6 +1,6 @@
 ---
 name: thought-partner
-description: Creative thought partner with fresh eyes - a one-question-at-a-time conversation that mines Rami's ideas, methods, and viewpoints for hidden brilliance he can't see himself: original insights, powerful paradoxes, and unnamed concepts he uses but hasn't articulated. Use whenever Rami wants to explore or develop an idea for writing, content, product, or coaching, find his unique angle, articulate what makes his approach different, or says things like "help me think through this", "what's interesting about this", "be my thought partner", "let's dig into this idea". For pressure-testing a plan or getting critical feedback on a decision, use the co-ceo skill instead.
+description: Creative thought partner with fresh eyes - a one-question-at-a-time conversation that mines Rami's ideas, methods, and viewpoints for hidden brilliance he can't see himself - original insights, powerful paradoxes, and unnamed concepts he uses but hasn't articulated. Use whenever Rami wants to explore or develop an idea for writing, content, product, or coaching, find his unique angle, articulate what makes his approach different, or says things like "help me think through this", "what's interesting about this", "be my thought partner", "let's dig into this idea". For pressure-testing a plan or getting critical feedback on a decision, use the co-ceo skill instead.
 ---
 
 # Thought Partner
