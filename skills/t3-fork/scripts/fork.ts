@@ -1,28 +1,37 @@
 #!/usr/bin/env bun
-// fork (branch) or duplicate a t3 code conversation.
+// fork (branch) or duplicate a t3 code conversation, from claude code, codex,
+// or cursor. by default the fork stays on the same agent as the source; pass
+// --provider to hand it to a different one instead.
 //
 // how it works:
-//   1. resolve the claude code session behind a t3 thread (t3 keeps the
-//      session id in provider_session_runtime.resume_cursor_json).
-//   2. copy the session transcript (~/.claude/projects/<slug>/<id>.jsonl)
-//      to a new session id, optionally cut after the n-th user turn.
-//   3. register the copy in t3 through its own transcript importer
-//      (agentSessions.import over the local websocket rpc) so the history is
-//      visible in the ui. the importer processes every transcript of the
-//      project, so the other transcripts are shielded with temporary runtime
-//      bindings that make the importer skip them, removed right after.
+//   1. resolve the t3 thread (if any) and the agent + native session id behind it.
+//      t3 keeps this in provider_session_runtime.resume_cursor_json - claude's
+//      shape is {threadId, resume: <sessionId>}, codex's is {threadId: <sessionId>}.
+//   2. same agent (default): copy the real session file (claude's
+//      ~/.claude/projects/<slug>/<id>.jsonl, or codex's
+//      ~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl), optionally cut after the
+//      n-th user turn, and register the copy in t3 through its own transcript
+//      importer (agentSessions.import over the local websocket rpc) so the
+//      history is visible in the ui. the importer processes every transcript
+//      of the project, so the other transcripts are shielded with temporary
+//      runtime bindings that make the importer skip them, removed right after.
+//      cursor has no importable transcript format, so it always uses the
+//      seeded path below even when it is also the source agent.
+//   3. --provider (or a source agent with no native-resume support): codex,
+//      cursor, and claude cannot read each other's session files, and cursor
+//      has no t3-importable format at all, so there is no way to hand a live
+//      session to a different agent, or "resume" cursor from a cold file.
+//      instead this reads t3's own provider-agnostic message log
+//      (projection_thread_messages - already clean role+text, no tool calls,
+//      no system-reminder noise, regardless of which agent produced it),
+//      renders the kept turns as plain text, and sends that as a brand-new
+//      thread's first message. the new agent starts with that as context
+//      rather than a resumed session.
 //
 // usage:
-//   bun run fork.ts [--current | --thread <t3-thread-id> | --session <claude-session-id>]
+//   bun run fork.ts [--current | --thread <t3-thread-id> | --session <uuid>]
 //                   [--list] [--first <n> | --last <n>] [--title <text>] [--no-register] [--dry-run]
 //                   [--provider <name> [--model <name>]]
-//
-// --provider creates a brand-new thread under a different agent (codex, cursor,
-// a different claude model, ...) instead of resuming the native session. codex,
-// cursor, and claude cannot read each other's session files, so there is no way
-// to hand a live session to a different agent. instead the kept turns are
-// rendered as plain text and sent as the new thread's first message, so the new
-// agent starts with that as context rather than a resumed session.
 
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, statSync, cpSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
@@ -42,7 +51,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   codex: "gpt-5.6-sol",
   claudeAgent: "claude-sonnet-5",
-  cursor: "auto",
+  cursor: "default",
 };
 
 type Args = {
@@ -65,12 +74,15 @@ function usage(exit = 0): never {
 
 usage: bun run fork.ts [source] [options]
 
-source (default: --current):
-  --current             the conversation this script runs inside (walks the parent
-                        claude process for --session-id / --resume), else the only
-                        running t3 thread for the current directory
-  --thread <id>         a t3 thread id
-  --session <uuid>      a claude code session id
+source (default: --current), works from claude code, codex, or cursor:
+  --current             the conversation this script runs inside. walks the
+                        parent process for a claude session id (precise even
+                        with several claude threads in this directory); for
+                        codex/cursor, or if that walk finds nothing, falls back
+                        to the only running t3 thread for this directory
+  --thread <id>         a t3 thread id (any agent)
+  --session <uuid>      a native session id (claude or codex; a bare cursor
+                        chat id is not supported, use --thread instead)
 
 options:
   --list                print the user turns of the source and exit
@@ -80,14 +92,17 @@ options:
                         the new thread has no memory of anything before them
   --title <text>        title for the new thread (default: "<source title> (fork)")
   --no-register         only write the transcript copy, do not create a t3 thread
+                        (with --provider: print what would be sent instead)
   --include-trigger     with --current, keep the last user turn (the message that
                         ran this command). by default it is dropped so the fork
                         does not start with its own invocation
   --provider <name>     fork into a new thread under a different agent (codex,
-                        cursor, claudeAgent, ...) instead of resuming the native
-                        session. the kept turns are sent as plain text in the new
-                        thread's first message. with this, --no-register only
-                        prints what would be sent
+                        cursor, claudeAgent, ...) instead of the same-agent
+                        default. codex and cursor cannot read a claude session
+                        file or each other's, and cursor has no t3-importable
+                        format at all (so it always uses this path even as the
+                        default, same-agent target). the kept turns are sent as
+                        plain text in the new thread's first message instead
   --model <name>        model for --provider (default: a sane per-provider
                         default for codex/cursor/claudeAgent; required for
                         other providers)
@@ -152,6 +167,7 @@ type ThreadRow = {
   interaction_mode: string;
   model_selection_json: string | null;
   workspace_root: string;
+  provider: string | null;
   session_id: string | null;
   status: string | null;
   cwd: string | null;
@@ -166,7 +182,10 @@ const THREAD_SELECT = `
   select t.thread_id, t.project_id, t.title, t.branch, t.worktree_path,
          t.runtime_mode, t.interaction_mode, t.model_selection_json,
          p.workspace_root,
-         json_extract(r.resume_cursor_json, '$.resume') as session_id,
+         r.provider_name as provider,
+         -- claude's resume cursor is {threadId, resume: <sessionId>}; codex's is
+         -- {threadId: <sessionId>} directly, with no "resume" key at all
+         coalesce(json_extract(r.resume_cursor_json, '$.resume'), case when r.provider_name = 'codex' then json_extract(r.resume_cursor_json, '$.threadId') end) as session_id,
          r.status,
          json_extract(r.runtime_payload_json, '$.cwd') as cwd
   from projection_threads t
@@ -219,16 +238,16 @@ function sessionFromParentProcesses(): string | null {
 
 // ---------- transcript handling ----------
 
-function findTranscript(sessionId: string): string {
-  if (!existsSync(CLAUDE_PROJECTS)) fail(`claude projects directory not found at ${CLAUDE_PROJECTS}`);
+type Record = { [key: string]: any };
+
+function findClaudeTranscript(sessionId: string): string | null {
+  if (!existsSync(CLAUDE_PROJECTS)) return null;
   for (const dir of readdirSync(CLAUDE_PROJECTS)) {
     const candidate = join(CLAUDE_PROJECTS, dir, `${sessionId}.jsonl`);
     if (existsSync(candidate)) return candidate;
   }
-  fail(`no transcript found for session ${sessionId} under ${CLAUDE_PROJECTS}`);
+  return null;
 }
-
-type Record = { [key: string]: any };
 
 function readTranscript(path: string): Record[] {
   const lines = readFileSync(path, "utf8").split("\n").filter((l) => l.trim().length > 0);
@@ -241,7 +260,7 @@ function readTranscript(path: string): Record[] {
   });
 }
 
-function textOf(content: unknown): string {
+function claudeTextOf(content: unknown): string {
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content
@@ -256,41 +275,20 @@ function isToolResultOnly(content: unknown): boolean {
 }
 
 // a user turn is a real prompt from the human: not a tool result, not meta, not a sidechain
-function isUserTurn(r: Record): boolean {
+function isClaudeUserTurn(r: Record): boolean {
   if (r.type !== "user") return false;
   if (r.isMeta === true || r.isSidechain === true || r.isCompactSummary === true) return false;
   const content = r.message?.content;
   if (isToolResultOnly(content)) return false;
-  return textOf(content).length > 0;
+  return claudeTextOf(content).length > 0;
 }
 
-function userTurnIndices(records: Record[]): number[] {
+function claudeUserTurnIndices(records: Record[]): number[] {
   const out: number[] = [];
   records.forEach((r, i) => {
-    if (isUserTurn(r)) out.push(i);
+    if (isClaudeUserTurn(r)) out.push(i);
   });
   return out;
-}
-
-// an assistant reply with actual prose, not a bare tool call
-function isAssistantReply(r: Record): boolean {
-  if (r.type !== "assistant") return false;
-  if (r.isMeta === true || r.isSidechain === true || r.isCompactSummary === true) return false;
-  return textOf(r.message?.content).length > 0;
-}
-
-// plain-text digest of the kept turns for a --provider fork: a different agent
-// cannot resume a foreign session file, so this is what it gets as context
-// instead. tool calls are left out; only the human-readable back-and-forth
-// carries over.
-function renderConversation(records: Record[], start: number, end: number): string {
-  const parts: string[] = [];
-  for (let i = start; i < end; i++) {
-    const r = records[i];
-    if (isUserTurn(r)) parts.push(`User: ${textOf(r.message?.content)}`);
-    else if (isAssistantReply(r)) parts.push(`Assistant: ${textOf(r.message?.content)}`);
-  }
-  return parts.join("\n\n");
 }
 
 function transcriptTitle(records: Record[]): string | null {
@@ -332,6 +330,80 @@ function copySessionDir(srcDir: string, dstDir: string, from: string, to: string
   };
   walk(dstDir);
   return true;
+}
+
+// ---------- codex transcript handling ----------
+// codex stores sessions as "rollout" files under ~/.codex/sessions/<year>/<month>/<day>/
+// rollout-<timestamp>-<id>.jsonl. unlike claude's format there is no parent-link
+// chain to worry about when slicing, and text lives in "input_text"/"output_text"
+// content blocks instead of "text" blocks.
+
+function codexSessionsDir(): string {
+  return join(process.env.CODEX_HOME ?? join(HOME, ".codex"), "sessions");
+}
+
+// codexSessionMeta and walkJsonl are declared later (used by the t3-import
+// shielding step too); function declarations are hoisted, so this is fine.
+function findCodexTranscript(sessionId: string): string | null {
+  const files: string[] = [];
+  walkJsonl(codexSessionsDir(), files);
+  for (const file of files) {
+    if (!basename(file).startsWith("rollout-")) continue;
+    if (codexSessionMeta(file).id?.toLowerCase() === sessionId.toLowerCase()) return file;
+  }
+  return null;
+}
+
+function codexTextOf(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => b && typeof b === "object" && (b.type === "input_text" || b.type === "output_text") && typeof b.text === "string")
+    .map((b) => b.text)
+    .join(" ")
+    .trim();
+}
+
+// codex injects environment/plugin/instructions context as ordinary "user"
+// role messages, indistinguishable from a real prompt except by content: they
+// are always a bare xml-ish tag block or the project instructions header.
+// there is no metadata flag to key off, unlike claude's isMeta/isSidechain.
+const CODEX_SYNTHETIC_USER_RE = /^(<[a-zA-Z_]+>|# AGENTS\.md instructions for )/;
+
+function isCodexUserTurn(r: Record): boolean {
+  if (r.type !== "response_item" || r.payload?.type !== "message" || r.payload?.role !== "user") return false;
+  const text = codexTextOf(r.payload.content);
+  return text.length > 0 && !CODEX_SYNTHETIC_USER_RE.test(text);
+}
+
+function codexUserTurnIndices(records: Record[]): number[] {
+  const out: number[] = [];
+  records.forEach((r, i) => {
+    if (isCodexUserTurn(r)) out.push(i);
+  });
+  return out;
+}
+
+function codexCwd(records: Record[]): string | null {
+  for (const r of records) if (r.type === "session_meta" && typeof r.payload?.cwd === "string" && r.payload.cwd.trim()) return r.payload.cwd.trim();
+  return null;
+}
+
+// rewrite the session_meta record(s) carrying the old session id; codex has no
+// parent-link chain, so unlike claude's --last there is nothing else to fix up
+function rewriteCodexSessionId(records: Record[], from: string, to: string): Record[] {
+  return records.map((r) => {
+    if (r.type !== "session_meta" || !r.payload) return r;
+    const payload = { ...r.payload };
+    if (payload.id === from) payload.id = to;
+    if (payload.session_id === from) payload.session_id = to;
+    return { ...r, payload };
+  });
+}
+
+function codexRolloutFilename(sessionId: string): string {
+  const ts = new Date().toISOString().replace(/:/g, "-").split(".")[0];
+  return `rollout-${ts}-${sessionId}.jsonl`;
 }
 
 // ---------- t3 registration ----------
@@ -530,7 +602,7 @@ function otherEligibleSessions(workspaceRoot: string, excludePath: string): Othe
   const codexFiles: string[] = [];
   walkJsonl(join(process.env.CODEX_HOME ?? join(HOME, ".codex"), "sessions"), codexFiles);
   for (const file of codexFiles) {
-    if (!basename(file).startsWith("rollout-") || !recent(file)) continue;
+    if (!basename(file).startsWith("rollout-") || file === excludePath || !recent(file)) continue;
     const meta = codexSessionMeta(file);
     if (!meta.cwd || dirIdentity(meta.cwd) !== rootId) continue;
     add("codex", meta.id);
@@ -637,16 +709,39 @@ function importedThreadSummary(threadId: string): { title: string; messages: num
   }
 }
 
-// ---------- cross-agent fork (--provider) ----------
+// ---------- provider-agnostic message history (used for --provider / cursor forks) ----------
+// t3 keeps a clean, already-deduplicated role+text log per thread regardless of
+// which agent produced it. no tool calls, no system-reminder noise: this is
+// exactly what a different agent (or a --list preview) should see.
+
+type DbMessage = { role: "user" | "assistant"; text: string };
+
+function dbThreadMessages(threadId: string): DbMessage[] {
+  const db = new Database(T3_DB, { readonly: true });
+  try {
+    return db
+      .query<{ role: string; text: string }, [string]>(
+        `select role, text from projection_thread_messages
+         where thread_id = ? and role in ('user', 'assistant') and text != ''
+         order by created_at, message_id`,
+      )
+      .all(threadId)
+      .map((r) => ({ role: r.role as "user" | "assistant", text: r.text }));
+  } finally {
+    db.close();
+  }
+}
+
+// ---------- cross-agent / seeded fork (used when no native resume applies) ----------
 
 type ProviderForkInput = {
   args: Args;
   provider: string;
   sourceTitle: string;
-  turns: number[];
-  records: Record[];
+  messages: DbMessage[];
   rangeStart: number;
   rangeEnd: number;
+  totalUserTurns: number;
   keptTurns: number;
   droppedTrigger: boolean;
   project: { project_id: string; workspace_root: string } | null;
@@ -654,7 +749,7 @@ type ProviderForkInput = {
 };
 
 async function runProviderFork(input: ProviderForkInput): Promise<void> {
-  const { args, provider, sourceTitle, turns, records, rangeStart, rangeEnd, keptTurns, droppedTrigger, project, thread } = input;
+  const { args, provider, sourceTitle, messages, rangeStart, rangeEnd, totalUserTurns, keptTurns, droppedTrigger, project, thread } = input;
   const model = args.model ?? DEFAULT_MODEL_BY_PROVIDER[provider];
   if (!model) {
     fail(
@@ -662,14 +757,17 @@ async function runProviderFork(input: ProviderForkInput): Promise<void> {
         `(known defaults: ${Object.keys(DEFAULT_MODEL_BY_PROVIDER).join(", ")})`,
     );
   }
-  const rendered = renderConversation(records, rangeStart, rangeEnd);
+  const rendered = messages
+    .slice(rangeStart, rangeEnd)
+    .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`)
+    .join("\n\n");
   if (!rendered) fail("nothing to send: the kept turns have no user or assistant text");
   const title = args.title ?? `${sourceTitle} (fork → ${provider})`;
   const rangeNote = args.last !== undefined ? " (last)" : "";
 
   console.log(`source:   ${sourceTitle}`);
-  console.log(`          session ${turns.length} user turns total${thread ? `, thread ${thread.thread_id}` : ""}`);
-  console.log(`copy:     ${keptTurns}/${turns.length} user turns${rangeNote}, sent as plain text${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
+  console.log(`          ${totalUserTurns} user turns total${thread ? `, thread ${thread.thread_id}` : ""}`);
+  console.log(`copy:     ${keptTurns}/${totalUserTurns} user turns${rangeNote}, sent as plain text${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
   console.log(`title:    ${title}`);
   console.log(`agent:    ${provider} / ${model} (fresh thread, no native resume)`);
 
@@ -725,118 +823,58 @@ async function runProviderFork(input: ProviderForkInput): Promise<void> {
   console.log(`done. ${provider} is starting a fresh session with the copied conversation as its first message.`);
 }
 
-// ---------- main ----------
+// ---------- native resume (same agent: claude or codex) ----------
+// resumes the real session file, so the new thread has true native memory
+// (tool calls included), not just a pasted text digest. this is only possible
+// when the source and target are the same agent, and only claude and codex
+// have a t3-importable transcript format; cursor always uses runProviderFork.
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const db = openReadOnly();
+type NativeForkInput = {
+  args: Args;
+  provider: "claudeAgent" | "codex";
+  sessionId: string;
+  sourceTitle: string;
+  records: Record[];
+  rangeStart: number;
+  rangeEnd: number;
+  keptTurns: number;
+  totalUserTurns: number;
+  droppedTrigger: boolean;
+  srcPath: string;
+  project: { project_id: string; workspace_root: string } | null;
+  workspaceRoot: string | null;
+  thread: ThreadRow | null;
+};
 
-  // 1. resolve the source session and (if any) its t3 thread
-  let sessionId: string;
-  let thread: ThreadRow | null = null;
-  if (args.session) {
-    if (!UUID_RE.test(args.session)) fail("--session expects a uuid");
-    sessionId = args.session.toLowerCase();
-    thread = threadBySession(db, sessionId);
-  } else if (args.thread) {
-    thread = threadById(db, args.thread);
-    if (!thread) fail(`t3 thread ${args.thread} not found`);
-    if (!thread.session_id) fail(`t3 thread ${args.thread} has no claude session yet (send one message first)`);
-    sessionId = thread.session_id;
-  } else {
-    const fromProcess = sessionFromParentProcesses();
-    if (fromProcess) {
-      sessionId = fromProcess;
-      thread = threadBySession(db, sessionId);
-    } else {
-      const running = runningThreadsForCwd(db, process.cwd());
-      if (running.length === 0) fail(`no running t3 thread found for ${process.cwd()}; pass --thread or --session`);
-      if (running.length > 1) {
-        console.error("several running t3 threads for this directory, pass --thread <id>:");
-        for (const t of running) console.error(`  ${t.thread_id}  ${t.title}`);
-        process.exit(1);
-      }
-      thread = running[0];
-      if (!thread.session_id) fail(`t3 thread ${thread.thread_id} has no claude session yet`);
-      sessionId = thread.session_id;
-    }
-  }
-
-  const srcPath = findTranscript(sessionId);
-  const records = readTranscript(srcPath);
-  const turns = userTurnIndices(records);
-  const sourceTitle = thread?.title ?? transcriptTitle(records) ?? "untitled";
-
-  if (args.list) {
-    console.log(`source: ${sourceTitle}`);
-    console.log(`session: ${sessionId}`);
-    if (thread) console.log(`thread:  ${thread.thread_id}`);
-    console.log(`user turns: ${turns.length}`);
-    turns.forEach((idx, n) => {
-      const r = records[idx];
-      const when = typeof r.timestamp === "string" ? r.timestamp.replace("T", " ").slice(0, 16) : "";
-      const text = textOf(r.message?.content).replace(/\s+/g, " ");
-      console.log(`  ${String(n + 1).padStart(3)}  ${when}  ${text.length > 90 ? text.slice(0, 90) + "..." : text}`);
-    });
-    return;
-  }
-
-  if (turns.length === 0) fail("the source conversation has no user turns yet");
-  if (args.first !== undefined && args.first > turns.length) fail(`--first ${args.first} exceeds the ${turns.length} user turns in the source`);
-  if (args.last !== undefined && args.last > turns.length) fail(`--last ${args.last} exceeds the ${turns.length} user turns in the source`);
-
-  // when forking the live conversation, its own last turn is the command that
-  // triggered this fork (e.g. "/t3-fork"). drop it by default so the new
-  // thread does not start with a copy of that invocation.
-  let first = args.first;
-  let droppedTrigger = false;
-  if (first === undefined && args.last === undefined && args.current && !args.includeTrigger && turns.length > 1) {
-    first = turns.length - 1;
-    droppedTrigger = true;
-  }
-
-  // 2. figure out the kept range: --first keeps a prefix [0, cut); --last keeps
-  // a suffix [start, end).
-  let rangeStart = 0;
-  let rangeEnd = records.length;
-  let keptTurns: number;
-  if (args.last !== undefined) {
-    rangeStart = turns[turns.length - args.last];
-    keptTurns = args.last;
-  } else {
-    rangeEnd = first !== undefined && first < turns.length ? turns[first] : records.length;
-    keptTurns = first ?? turns.length;
-  }
-
-  // 3. figure out where the t3 thread goes
-  const workspaceRoot = thread?.workspace_root ?? transcriptCwd(records);
-  const cwd = thread?.cwd ?? transcriptCwd(records) ?? workspaceRoot;
-  const project = thread ? { project_id: thread.project_id, workspace_root: thread.workspace_root } : workspaceRoot ? projectForWorkspace(db, workspaceRoot) : null;
-  db.close();
-
-  if (args.provider) {
-    await runProviderFork({
-      args, provider: args.provider, sourceTitle, turns, records, rangeStart, rangeEnd, keptTurns,
-      droppedTrigger, project, thread,
-    });
-    return;
-  }
-
-  // the native-resume path: --first keeps a prefix (records already start at
-  // the session's real beginning, so the parent chain is intact); --last
-  // keeps a suffix and needs its first record's parent link cleared, since
-  // that parent falls outside the slice.
-  const rawSlice = records.slice(rangeStart, rangeEnd);
-  if (rangeStart > 0 && "parentUuid" in rawSlice[0]) rawSlice[0] = { ...rawSlice[0], parentUuid: null };
+async function runNativeFork(input: NativeForkInput): Promise<void> {
+  const { args, provider, sessionId, sourceTitle, records, rangeStart, rangeEnd, keptTurns, totalUserTurns, droppedTrigger, srcPath, project, workspaceRoot, thread } = input;
   const newSessionId = crypto.randomUUID();
   const title = args.title ?? `${sourceTitle} (fork)`;
-  const dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
-  const forked = rewriteSessionId(rawSlice, sessionId, newSessionId, title);
+  const rawSlice = records.slice(rangeStart, rangeEnd);
+  let forked: Record[];
+  let dstPath: string;
+  let needsTitleFix: boolean;
+
+  if (provider === "claudeAgent") {
+    // --first keeps a prefix (records already start at the session's real
+    // beginning, so the parent chain is intact); --last keeps a suffix and
+    // needs its first record's parent link cleared, since that parent falls
+    // outside the slice.
+    if (rangeStart > 0 && "parentUuid" in rawSlice[0]) rawSlice[0] = { ...rawSlice[0], parentUuid: null };
+    forked = rewriteSessionId(rawSlice, sessionId, newSessionId, title);
+    dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
+    needsTitleFix = false; // the injected ai-title record already carries the title
+  } else {
+    // codex has no parent-link chain, so a --last slice needs no fix-up
+    forked = rewriteCodexSessionId(rawSlice, sessionId, newSessionId);
+    dstPath = join(dirname(srcPath), codexRolloutFilename(newSessionId));
+    needsTitleFix = true; // codex's own importer derives a title; overwrite it after
+  }
 
   console.log(`source:   ${sourceTitle}`);
-  console.log(`          session ${sessionId}${thread ? `, thread ${thread.thread_id}` : " (not bound to a t3 thread)"}`);
+  console.log(`          ${provider} session ${sessionId}${thread ? `, thread ${thread.thread_id}` : " (not bound to a t3 thread)"}`);
   const rangeNote = args.last !== undefined ? " (last)" : "";
-  console.log(`copy:     ${keptTurns}/${turns.length} user turns${rangeNote}, ${forked.length}/${records.length} records${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
+  console.log(`copy:     ${keptTurns}/${totalUserTurns} user turns${rangeNote}, ${forked.length}/${records.length} records${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
   console.log(`          ${dstPath}`);
   console.log(`title:    ${title}`);
 
@@ -854,18 +892,21 @@ async function main() {
   }
 
   writeTranscript(dstPath, forked);
-  const copiedDir = copySessionDir(join(dirname(srcPath), sessionId), join(dirname(srcPath), newSessionId), sessionId, newSessionId);
-  if (copiedDir) console.log(`          copied subagent transcripts`);
+  if (provider === "claudeAgent") {
+    const copiedDir = copySessionDir(join(dirname(srcPath), sessionId), join(dirname(srcPath), newSessionId), sessionId, newSessionId);
+    if (copiedDir) console.log(`          copied subagent transcripts`);
+  }
 
   if (!args.register || !project) {
-    console.log(`done. resume it with: claude --resume ${newSessionId}`);
+    const resumeHint = provider === "claudeAgent" ? `claude --resume ${newSessionId}` : `codex resume ${newSessionId}`;
+    console.log(`done. resume it with: ${resumeHint}`);
     return;
   }
 
-  // 4. register the copy through t3's importer so the history shows in the ui
+  // register the copy through t3's importer so the history shows in the ui
   const app = findT3App();
   const origin = serverOrigin();
-  const newThreadId = `import:claudeAgent:${newSessionId}`;
+  const newThreadId = `import:${provider}:${newSessionId}`;
   const issued = issueToken(app);
   try {
     const ticket = await wsTicket(origin, issued.token);
@@ -893,10 +934,13 @@ async function main() {
     const summary = importedThreadSummary(newThreadId);
     // the importer marks threads as settled, which hides them in the sidebar's
     // collapsed "settled" group; unsettle so the fork shows up with active threads
-    if (summary) await dispatch(origin, issued.token, { type: "thread.unsettle", commandId: crypto.randomUUID(), threadId: newThreadId, reason: "user" });
+    if (summary) {
+      await dispatch(origin, issued.token, { type: "thread.unsettle", commandId: crypto.randomUUID(), threadId: newThreadId, reason: "user" });
+      if (needsTitleFix) await dispatch(origin, issued.token, { type: "thread.meta.update", commandId: crypto.randomUUID(), threadId: newThreadId, title });
+    }
     if (!summary) {
       unlinkSync(dstPath);
-      rmSync(join(dirname(srcPath), newSessionId), { recursive: true, force: true });
+      if (provider === "claudeAgent") rmSync(join(dirname(srcPath), newSessionId), { recursive: true, force: true });
       fail(`t3 did not import the copy (imported ${result.importedCount}, skipped ${result.skippedCount}); copy removed`);
     }
     console.log(`thread:   ${newThreadId}`);
@@ -906,6 +950,172 @@ async function main() {
   }
 
   console.log("done. the new thread is in the t3 sidebar with its history; its first message continues the copied conversation.");
+}
+
+// ---------- main ----------
+
+const NATIVE_PROVIDERS = new Set(["claudeAgent", "codex"]);
+
+function findNativeTranscript(provider: string, sessionId: string): string | null {
+  return provider === "claudeAgent" ? findClaudeTranscript(sessionId) : findCodexTranscript(sessionId);
+}
+
+function nativeUserTurnIndices(provider: string, records: Record[]): number[] {
+  return provider === "claudeAgent" ? claudeUserTurnIndices(records) : codexUserTurnIndices(records);
+}
+
+// where --first/--last/the default trigger-drop land, shared by both the
+// native (turn-index-based) and seeded (db-row-based) paths
+function resolveRange(totalTurns: number, turnIndex: (n: number) => number, endIndex: number, args: Args): {
+  rangeStart: number; rangeEnd: number; keptTurns: number; droppedTrigger: boolean;
+} {
+  let first = args.first;
+  let droppedTrigger = false;
+  if (first === undefined && args.last === undefined && args.current && !args.includeTrigger && totalTurns > 1) {
+    first = totalTurns - 1;
+    droppedTrigger = true;
+  }
+  if (args.last !== undefined) return { rangeStart: turnIndex(totalTurns - args.last), rangeEnd: endIndex, keptTurns: args.last, droppedTrigger };
+  const rangeEnd = first !== undefined && first < totalTurns ? turnIndex(first) : endIndex;
+  return { rangeStart: 0, rangeEnd, keptTurns: first ?? totalTurns, droppedTrigger };
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const db = openReadOnly();
+
+  // 1. resolve the source: a t3 thread (if any), its agent, and its native
+  // session id (if the agent has one and needs one for a native resume).
+  let thread: ThreadRow | null = null;
+  let sourceProvider: string | null = null;
+  let sessionId: string | null = null;
+
+  if (args.session) {
+    if (!UUID_RE.test(args.session)) fail("--session expects a uuid");
+    sessionId = args.session.toLowerCase();
+    thread = threadBySession(db, sessionId);
+    if (thread) sourceProvider = thread.provider;
+    else if (findClaudeTranscript(sessionId)) sourceProvider = "claudeAgent";
+    else if (findCodexTranscript(sessionId)) sourceProvider = "codex";
+    else fail(`session ${sessionId} not found under claude or codex transcripts, and no t3 thread references it`);
+  } else if (args.thread) {
+    thread = threadById(db, args.thread);
+    if (!thread) fail(`t3 thread ${args.thread} not found`);
+    sourceProvider = thread.provider;
+    sessionId = thread.session_id;
+    if (!sourceProvider) fail(`t3 thread ${args.thread} has no provider session yet (send one message first)`);
+  } else {
+    // claude only: cheap and precise when it works (picks the exact session
+    // even if several claude threads share this cwd, e.g. subagents).
+    // codex/cursor fall through to the cwd lookup below, which is fully
+    // provider-agnostic and already correct for them.
+    const fromProcess = sessionFromParentProcesses();
+    if (fromProcess) {
+      sessionId = fromProcess;
+      thread = threadBySession(db, sessionId);
+      sourceProvider = thread?.provider ?? "claudeAgent";
+    } else {
+      const running = runningThreadsForCwd(db, process.cwd());
+      if (running.length === 0) fail(`no running t3 thread found for ${process.cwd()}; pass --thread or --session`);
+      if (running.length > 1) {
+        console.error("several running t3 threads for this directory, pass --thread <id>:");
+        for (const t of running) console.error(`  ${t.thread_id}  ${t.title} (${t.provider ?? "unknown"})`);
+        process.exit(1);
+      }
+      thread = running[0];
+      sourceProvider = thread.provider;
+      sessionId = thread.session_id;
+      if (!sourceProvider) fail(`t3 thread ${thread.thread_id} has no provider session yet`);
+    }
+  }
+  if (!sourceProvider) fail("could not determine which agent this conversation belongs to");
+
+  const targetProvider = args.provider ?? sourceProvider;
+  const useNative = targetProvider === sourceProvider && NATIVE_PROVIDERS.has(sourceProvider);
+  const sourceTitle = thread?.title ?? "untitled";
+
+  // ---- --list: preview turns without changing anything ----
+  if (args.list) {
+    if (thread) {
+      const messages = dbThreadMessages(thread.thread_id);
+      console.log(`source: ${sourceTitle}`);
+      console.log(`thread: ${thread.thread_id} (${sourceProvider})`);
+      console.log(`user turns: ${messages.filter((m) => m.role === "user").length}`);
+      let n = 0;
+      for (const m of messages) {
+        if (m.role !== "user") continue;
+        n += 1;
+        const text = m.text.replace(/\s+/g, " ");
+        console.log(`  ${String(n).padStart(3)}  ${text.length > 90 ? text.slice(0, 90) + "..." : text}`);
+      }
+    } else {
+      if (!sessionId) fail("nothing to list");
+      const srcPath = findNativeTranscript(sourceProvider, sessionId);
+      if (!srcPath) fail(`no ${sourceProvider} transcript found for session ${sessionId}`);
+      const records = readTranscript(srcPath);
+      const turns = nativeUserTurnIndices(sourceProvider, records);
+      const textOfTurn = (r: Record) => (sourceProvider === "claudeAgent" ? claudeTextOf(r.message?.content) : codexTextOf(r.payload?.content));
+      console.log(`source: ${sourceProvider === "claudeAgent" ? (transcriptTitle(records) ?? "untitled") : "untitled"}`);
+      console.log(`session: ${sessionId} (${sourceProvider}, not bound to a t3 thread)`);
+      console.log(`user turns: ${turns.length}`);
+      turns.forEach((idx, i) => {
+        const text = textOfTurn(records[idx]).replace(/\s+/g, " ");
+        console.log(`  ${String(i + 1).padStart(3)}  ${text.length > 90 ? text.slice(0, 90) + "..." : text}`);
+      });
+    }
+    db.close();
+    return;
+  }
+
+  // ---- native resume: same agent, real session file, full fidelity ----
+  if (useNative) {
+    if (!sessionId) fail(`no ${sourceProvider} session id available for this source`);
+    const srcPath = findNativeTranscript(sourceProvider, sessionId);
+    if (!srcPath) fail(`no ${sourceProvider} transcript found for session ${sessionId}`);
+    const records = readTranscript(srcPath);
+    const turns = nativeUserTurnIndices(sourceProvider, records);
+    if (turns.length === 0) fail("the source conversation has no user turns yet");
+    if (args.first !== undefined && args.first > turns.length) fail(`--first ${args.first} exceeds the ${turns.length} user turns in the source`);
+    if (args.last !== undefined && args.last > turns.length) fail(`--last ${args.last} exceeds the ${turns.length} user turns in the source`);
+    const { rangeStart, rangeEnd, keptTurns, droppedTrigger } = resolveRange(turns.length, (n) => turns[n], records.length, args);
+
+    const resolvedTitle = thread?.title ?? (sourceProvider === "claudeAgent" ? transcriptTitle(records) : null) ?? "untitled";
+    const workspaceRoot = thread?.workspace_root ?? (sourceProvider === "claudeAgent" ? transcriptCwd(records) : codexCwd(records));
+    const project = thread
+      ? { project_id: thread.project_id, workspace_root: thread.workspace_root }
+      : workspaceRoot
+        ? projectForWorkspace(db, workspaceRoot)
+        : null;
+    db.close();
+
+    await runNativeFork({
+      args, provider: sourceProvider as "claudeAgent" | "codex", sessionId, sourceTitle: resolvedTitle, records,
+      rangeStart, rangeEnd, keptTurns, totalUserTurns: turns.length, droppedTrigger, srcPath, project, workspaceRoot, thread,
+    });
+    return;
+  }
+
+  // ---- seeded fork: different agent, or an agent (cursor) with no t3-importable
+  // transcript format. driven entirely by t3's own provider-agnostic message
+  // log, so it works no matter which agent produced the source conversation.
+  if (!thread) fail(`${targetProvider} forks need message history from a t3 thread; run this from inside a t3 thread, or pass --thread`);
+  const messages = dbThreadMessages(thread.thread_id);
+  const userIdx: number[] = [];
+  messages.forEach((m, i) => {
+    if (m.role === "user") userIdx.push(i);
+  });
+  if (userIdx.length === 0) fail("the source conversation has no user turns yet");
+  if (args.first !== undefined && args.first > userIdx.length) fail(`--first ${args.first} exceeds the ${userIdx.length} user turns in the source`);
+  if (args.last !== undefined && args.last > userIdx.length) fail(`--last ${args.last} exceeds the ${userIdx.length} user turns in the source`);
+  const { rangeStart, rangeEnd, keptTurns, droppedTrigger } = resolveRange(userIdx.length, (n) => userIdx[n], messages.length, args);
+
+  const project = { project_id: thread.project_id, workspace_root: thread.workspace_root };
+  db.close();
+
+  await runProviderFork({
+    args, provider: targetProvider, sourceTitle, messages, rangeStart, rangeEnd,
+    totalUserTurns: userIdx.length, keptTurns, droppedTrigger, project, thread,
+  });
 }
 
 await main();
