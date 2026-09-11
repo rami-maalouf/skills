@@ -15,6 +15,14 @@
 // usage:
 //   bun run fork.ts [--current | --thread <t3-thread-id> | --session <claude-session-id>]
 //                   [--list] [--first <n> | --last <n>] [--title <text>] [--no-register] [--dry-run]
+//                   [--provider <name> [--model <name>]]
+//
+// --provider creates a brand-new thread under a different agent (codex, cursor,
+// a different claude model, ...) instead of resuming the native session. codex,
+// cursor, and claude cannot read each other's session files, so there is no way
+// to hand a live session to a different agent. instead the kept turns are
+// rendered as plain text and sent as the new thread's first message, so the new
+// agent starts with that as context rather than a resumed session.
 
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, statSync, cpSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
@@ -29,6 +37,14 @@ const T3_RUNTIME = join(T3_HOME, "userdata", "server-runtime.json");
 const CLAUDE_PROJECTS = join(HOME, ".claude", "projects");
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// default model per agent, mirroring t3's own DEFAULT_MODEL_BY_PROVIDER for the
+// agents actually installed here. anything else needs an explicit --model.
+const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
+  codex: "gpt-5.6-sol",
+  claudeAgent: "claude-sonnet-5",
+  cursor: "auto",
+};
+
 type Args = {
   current: boolean;
   thread?: string;
@@ -40,6 +56,8 @@ type Args = {
   register: boolean;
   dryRun: boolean;
   includeTrigger: boolean;
+  provider?: string;
+  model?: string;
 };
 
 function usage(exit = 0): never {
@@ -65,6 +83,14 @@ options:
   --include-trigger     with --current, keep the last user turn (the message that
                         ran this command). by default it is dropped so the fork
                         does not start with its own invocation
+  --provider <name>     fork into a new thread under a different agent (codex,
+                        cursor, claudeAgent, ...) instead of resuming the native
+                        session. the kept turns are sent as plain text in the new
+                        thread's first message. with this, --no-register only
+                        prints what would be sent
+  --model <name>        model for --provider (default: a sane per-provider
+                        default for codex/cursor/claudeAgent; required for
+                        other providers)
   --dry-run             print what would happen, change nothing
   -h, --help            show this help`);
   process.exit(exit);
@@ -94,6 +120,8 @@ function parseArgs(argv: string[]): Args {
       case "--title": args.title = next(); break;
       case "--no-register": args.register = false; break;
       case "--include-trigger": args.includeTrigger = true; break;
+      case "--provider": args.provider = next(); break;
+      case "--model": args.model = next(); break;
       case "--dry-run": args.dryRun = true; break;
       case "-h": case "--help": usage();
       default: fail(`unknown argument: ${a}`);
@@ -103,6 +131,7 @@ function parseArgs(argv: string[]): Args {
   if (sources > 1) fail("pick one of --current, --thread, --session");
   if (sources === 0) args.current = true;
   if (args.first !== undefined && args.last !== undefined) fail("pick one of --first, --last");
+  if (args.model !== undefined && args.provider === undefined) fail("--model requires --provider");
   return args;
 }
 
@@ -241,6 +270,27 @@ function userTurnIndices(records: Record[]): number[] {
     if (isUserTurn(r)) out.push(i);
   });
   return out;
+}
+
+// an assistant reply with actual prose, not a bare tool call
+function isAssistantReply(r: Record): boolean {
+  if (r.type !== "assistant") return false;
+  if (r.isMeta === true || r.isSidechain === true || r.isCompactSummary === true) return false;
+  return textOf(r.message?.content).length > 0;
+}
+
+// plain-text digest of the kept turns for a --provider fork: a different agent
+// cannot resume a foreign session file, so this is what it gets as context
+// instead. tool calls are left out; only the human-readable back-and-forth
+// carries over.
+function renderConversation(records: Record[], start: number, end: number): string {
+  const parts: string[] = [];
+  for (let i = start; i < end; i++) {
+    const r = records[i];
+    if (isUserTurn(r)) parts.push(`User: ${textOf(r.message?.content)}`);
+    else if (isAssistantReply(r)) parts.push(`Assistant: ${textOf(r.message?.content)}`);
+  }
+  return parts.join("\n\n");
 }
 
 function transcriptTitle(records: Record[]): string | null {
@@ -587,6 +637,94 @@ function importedThreadSummary(threadId: string): { title: string; messages: num
   }
 }
 
+// ---------- cross-agent fork (--provider) ----------
+
+type ProviderForkInput = {
+  args: Args;
+  provider: string;
+  sourceTitle: string;
+  turns: number[];
+  records: Record[];
+  rangeStart: number;
+  rangeEnd: number;
+  keptTurns: number;
+  droppedTrigger: boolean;
+  project: { project_id: string; workspace_root: string } | null;
+  thread: ThreadRow | null;
+};
+
+async function runProviderFork(input: ProviderForkInput): Promise<void> {
+  const { args, provider, sourceTitle, turns, records, rangeStart, rangeEnd, keptTurns, droppedTrigger, project, thread } = input;
+  const model = args.model ?? DEFAULT_MODEL_BY_PROVIDER[provider];
+  if (!model) {
+    fail(
+      `no default model known for provider "${provider}"; pass --model explicitly ` +
+        `(known defaults: ${Object.keys(DEFAULT_MODEL_BY_PROVIDER).join(", ")})`,
+    );
+  }
+  const rendered = renderConversation(records, rangeStart, rangeEnd);
+  if (!rendered) fail("nothing to send: the kept turns have no user or assistant text");
+  const title = args.title ?? `${sourceTitle} (fork → ${provider})`;
+  const rangeNote = args.last !== undefined ? " (last)" : "";
+
+  console.log(`source:   ${sourceTitle}`);
+  console.log(`          session ${turns.length} user turns total${thread ? `, thread ${thread.thread_id}` : ""}`);
+  console.log(`copy:     ${keptTurns}/${turns.length} user turns${rangeNote}, sent as plain text${droppedTrigger ? " (dropped the turn that triggered this fork)" : ""}`);
+  console.log(`title:    ${title}`);
+  console.log(`agent:    ${provider} / ${model} (fresh thread, no native resume)`);
+
+  if (!args.register || args.dryRun) {
+    console.log(args.dryRun ? "dry run: nothing sent" : "register: skipped (--no-register)");
+    console.log("--- message that would be sent ---");
+    console.log(rendered);
+    return;
+  }
+  if (!project) fail(`no t3 project matches the source's workspace root; open it as a t3 project first`);
+  console.log(`project:  ${project.workspace_root}`);
+
+  const app = findT3App();
+  const origin = serverOrigin();
+  const threadId = crypto.randomUUID();
+  const modelSelection = { instanceId: provider, model };
+  const runtimeMode = thread?.runtime_mode ?? "full-access";
+  const interactionMode = thread?.interaction_mode ?? "default";
+  const issued = issueToken(app);
+  try {
+    await dispatch(origin, issued.token, {
+      type: "thread.create",
+      commandId: crypto.randomUUID(),
+      threadId,
+      projectId: project.project_id,
+      title,
+      modelSelection,
+      runtimeMode,
+      interactionMode,
+      branch: thread?.branch ?? null,
+      worktreePath: thread?.worktree_path ?? null,
+      createdAt: new Date().toISOString(),
+    });
+    await dispatch(origin, issued.token, {
+      type: "thread.turn.start",
+      commandId: crypto.randomUUID(),
+      threadId,
+      message: { messageId: crypto.randomUUID(), role: "user", text: rendered, attachments: [] },
+      modelSelection,
+      titleSeed: title,
+      runtimeMode,
+      interactionMode,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    await dispatch(origin, issued.token, { type: "thread.delete", commandId: crypto.randomUUID(), threadId }).catch(() => {});
+    throw e;
+  } finally {
+    revokeToken(app, issued);
+  }
+
+  console.log(`thread:   ${threadId}`);
+  console.log(`done. ${provider} is starting a fresh session with the copied conversation as its first message.`);
+}
+
 // ---------- main ----------
 
 async function main() {
@@ -657,32 +795,43 @@ async function main() {
     droppedTrigger = true;
   }
 
-  // 2. build the copy: --first keeps a prefix (records already start at the
-  // session's real beginning, so the parent chain is intact); --last keeps a
-  // suffix and needs its first record's parent link cleared, since that
-  // parent falls outside the slice.
-  let rawSlice: Record[];
+  // 2. figure out the kept range: --first keeps a prefix [0, cut); --last keeps
+  // a suffix [start, end).
+  let rangeStart = 0;
+  let rangeEnd = records.length;
   let keptTurns: number;
   if (args.last !== undefined) {
-    const startTurn = turns.length - args.last;
-    rawSlice = records.slice(turns[startTurn]);
-    if (rawSlice.length > 0 && "parentUuid" in rawSlice[0]) rawSlice[0] = { ...rawSlice[0], parentUuid: null };
+    rangeStart = turns[turns.length - args.last];
     keptTurns = args.last;
   } else {
-    const cut = first !== undefined && first < turns.length ? turns[first] : records.length;
-    rawSlice = records.slice(0, cut);
+    rangeEnd = first !== undefined && first < turns.length ? turns[first] : records.length;
     keptTurns = first ?? turns.length;
   }
-  const newSessionId = crypto.randomUUID();
-  const title = args.title ?? `${sourceTitle} (fork)`;
-  const dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
-  const forked = rewriteSessionId(rawSlice, sessionId, newSessionId, title);
 
   // 3. figure out where the t3 thread goes
   const workspaceRoot = thread?.workspace_root ?? transcriptCwd(records);
   const cwd = thread?.cwd ?? transcriptCwd(records) ?? workspaceRoot;
   const project = thread ? { project_id: thread.project_id, workspace_root: thread.workspace_root } : workspaceRoot ? projectForWorkspace(db, workspaceRoot) : null;
   db.close();
+
+  if (args.provider) {
+    await runProviderFork({
+      args, provider: args.provider, sourceTitle, turns, records, rangeStart, rangeEnd, keptTurns,
+      droppedTrigger, project, thread,
+    });
+    return;
+  }
+
+  // the native-resume path: --first keeps a prefix (records already start at
+  // the session's real beginning, so the parent chain is intact); --last
+  // keeps a suffix and needs its first record's parent link cleared, since
+  // that parent falls outside the slice.
+  const rawSlice = records.slice(rangeStart, rangeEnd);
+  if (rangeStart > 0 && "parentUuid" in rawSlice[0]) rawSlice[0] = { ...rawSlice[0], parentUuid: null };
+  const newSessionId = crypto.randomUUID();
+  const title = args.title ?? `${sourceTitle} (fork)`;
+  const dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
+  const forked = rewriteSessionId(rawSlice, sessionId, newSessionId, title);
 
   console.log(`source:   ${sourceTitle}`);
   console.log(`          session ${sessionId}${thread ? `, thread ${thread.thread_id}` : " (not bound to a t3 thread)"}`);
