@@ -106,6 +106,13 @@ uv run python speech-video-transcriber/scripts/transcribe_video.py \
   --output "/path/to/output.md"
 ```
 
+# local with a timestamped "## segments" section (for paper edits / clip logging)
+uv run python speech-video-transcriber/scripts/transcribe_video.py \
+  "/absolute/path/to/video.mov" \
+  --local \
+  --segments
+```
+
 ## output contract
 
 the script writes one markdown file to the shared transcriptions directory and prints the final path.
@@ -118,6 +125,7 @@ the markdown includes:
 - optional language hint
 - chunk count
 - full transcript text
+- with `--segments` (local only): a `## segments` section, one `[mm:ss] text` line per whisper segment
 
 if a file with the same name already exists, the script appends a timestamp suffix instead of overwriting it.
 

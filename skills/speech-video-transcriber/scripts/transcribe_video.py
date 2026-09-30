@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=f"use local openai-whisper instead of the OpenAI API. default model: {DEFAULT_LOCAL_MODEL}",
     )
+    parser.add_argument(
+        "--segments",
+        action="store_true",
+        help="also write a '## segments' section with [mm:ss] timestamps (local backend only)",
+    )
     return parser.parse_args()
 
 
@@ -224,7 +229,7 @@ def transcribe_local(
     media_path: Path,
     model_name: str,
     language: str | None,
-) -> str:
+) -> tuple[str, list[str]]:
     try:
         import whisper
     except ImportError:
@@ -245,7 +250,16 @@ def transcribe_local(
     text = result.get("text", "")
     if not text:
         fail("local whisper returned no text")
-    return text.strip()
+
+    # one line per whisper segment: [mm:ss] text
+    segment_lines: list[str] = []
+    for segment in result.get("segments", []):
+        start = int(segment.get("start", 0))
+        minutes, seconds = divmod(start, 60)
+        segment_text = str(segment.get("text", "")).strip()
+        if segment_text:
+            segment_lines.append(f"[{minutes:02d}:{seconds:02d}] {segment_text}")
+    return text.strip(), segment_lines
 
 
 # -- cloud openai --
@@ -323,6 +337,7 @@ def build_markdown(
     chunk_count: int,
     duration_seconds: float | None,
     local: bool,
+    segments: list[str] | None = None,
 ) -> str:
     generated_at = datetime.now(timezone.utc).isoformat()
     duration_text = format_duration(duration_seconds)
@@ -365,6 +380,9 @@ def build_markdown(
         ]
     )
 
+    if segments:
+        body.extend(["## segments", "", *segments, ""])
+
     return "\n".join(frontmatter + [""] + body)
 
 
@@ -380,7 +398,7 @@ def main() -> None:
 
     if args.local:
         model_name = args.model if args.model != DEFAULT_MODEL else DEFAULT_LOCAL_MODEL
-        transcript_text = transcribe_local(
+        transcript_text, segment_lines = transcribe_local(
             media_path=media_path,
             model_name=model_name,
             language=args.language,
@@ -397,6 +415,9 @@ def main() -> None:
                 prompt=args.prompt,
             )
         chunk_count = len(chunk_paths)
+        segment_lines = []
+        if args.segments:
+            print("note: --segments is local-only, skipping for the cloud backend", file=sys.stderr)
 
     model_label = (args.model if args.model != DEFAULT_MODEL else DEFAULT_LOCAL_MODEL) if args.local else args.model
 
@@ -408,6 +429,7 @@ def main() -> None:
         chunk_count=chunk_count,
         duration_seconds=duration_seconds,
         local=args.local,
+        segments=segment_lines if args.segments else None,
     )
     output_path.write_text(markdown, encoding="utf-8")
     print(output_path)
