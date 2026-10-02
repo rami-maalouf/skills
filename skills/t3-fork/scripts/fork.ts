@@ -861,6 +861,14 @@ async function runNativeFork(input: NativeForkInput): Promise<void> {
     // needs its first record's parent link cleared, since that parent falls
     // outside the slice.
     if (rangeStart > 0 && "parentUuid" in rawSlice[0]) rawSlice[0] = { ...rawSlice[0], parentUuid: null };
+    // t3's importer only accepts a transcript whose first cwd is the project root. a
+    // --last slice may start in a subfolder the conversation had moved into, so the
+    // first kept record with a cwd gets the source's root cwd back.
+    if (rangeStart > 0) {
+      const rootCwd = transcriptCwd(records);
+      const i = rawSlice.findIndex((r) => typeof r.cwd === "string" && r.cwd.trim());
+      if (rootCwd && i >= 0 && rawSlice[i].cwd !== rootCwd) rawSlice[i] = { ...rawSlice[i], cwd: rootCwd };
+    }
     forked = rewriteSessionId(rawSlice, sessionId, newSessionId, title);
     dstPath = join(dirname(srcPath), `${newSessionId}.jsonl`);
     needsTitleFix = false; // the injected ai-title record already carries the title
