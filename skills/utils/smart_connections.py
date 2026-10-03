@@ -57,8 +57,65 @@ def _parse_ajson_file(filepath):
     return entries
 
 
+EMBED_DIM = 384  # TaylorAI/bge-micro-v2
+
+
+def _load_matrix_file_embeddings(vault_root):
+    """Load note-level embeddings from the newer Smart Connections layout.
+
+    Newer plugin versions write one ndjson index at
+    .smart-env/smart_sources/smart_sources.ajson and store the vectors as a
+    flat float32 matrix in a sibling file. Each source entry points at its
+    row via embedding.default.<file>.file_i.
+
+    Returns: dict of {vault_relative_path: vector_list}
+    """
+    import struct
+
+    sources_dir = os.path.join(vault_root, ".smart-env", "smart_sources")
+    index_path = os.path.join(sources_dir, "smart_sources.ajson")
+    if not os.path.exists(index_path):
+        return {}
+
+    matrices = {}
+
+    def matrix(name):
+        if name not in matrices:
+            path = os.path.join(sources_dir, name)
+            if not os.path.exists(path):
+                matrices[name] = None
+            else:
+                with open(path, "rb") as f:
+                    matrices[name] = f.read()
+        return matrices[name]
+
+    embeddings = {}
+    row_bytes = EMBED_DIM * 4
+    for key, val in _parse_ajson_file(index_path).items():
+        if not key.startswith("smart_sources:") or not isinstance(val, dict):
+            continue
+        slots = (val.get("embedding") or {}).get("default") or {}
+        for slot in slots.values():
+            if not isinstance(slot, dict) or "file_i" not in slot:
+                continue
+            data = matrix(slot.get("file"))
+            if data is None:
+                continue
+            start = slot["file_i"] * row_bytes
+            if start + row_bytes > len(data):
+                continue
+            vec = list(struct.unpack_from(f"<{EMBED_DIM}f", data, start))
+            note_path = val.get("path") or key[len("smart_sources:"):]
+            embeddings[note_path] = vec
+            break
+    return embeddings
+
+
 def load_note_embeddings(vault_root, model=DEFAULT_MODEL):
     """Load note-level embeddings from all .ajson files.
+
+    Reads the legacy per-note files in .smart-env/multi/ and the newer
+    smart_sources matrix layout. Newer data wins when both exist.
 
     Returns: dict of {vault_relative_path: vector_list}
     Skips notes with null entries (not yet embedded by SC).
@@ -82,6 +139,7 @@ def load_note_embeddings(vault_root, model=DEFAULT_MODEL):
                 note_path = val.get("path") or key[len("smart_sources:"):]
                 embeddings[note_path] = vec
 
+    embeddings.update(_load_matrix_file_embeddings(vault_root))
     return embeddings
 
 
