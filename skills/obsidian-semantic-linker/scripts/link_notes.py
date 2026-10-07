@@ -39,8 +39,13 @@ def process_files(embeddings, vault_root, target_dir="unprocessed", target_paths
     """Find and link notes in target_dir against the full embedding index."""
     print(f"Loaded {len(embeddings)} embeddings. Linking notes in '{target_dir}'...")
 
-    # normalize all vectors once
-    normed = {path: normalize(vec) for path, vec in embeddings.items()}
+    # normalize all vectors once, skipping notes that were moved or deleted
+    # after smart connections indexed them (their old paths stay in the index)
+    normed = {
+        path: normalize(vec)
+        for path, vec in embeddings.items()
+        if os.path.exists(os.path.join(vault_root, path))
+    }
     target_set = set(target_paths or [])
 
     updates = 0
@@ -60,12 +65,19 @@ def process_files(embeddings, vault_root, target_dir="unprocessed", target_paths
             if other_path != current_path and cosine_similarity(current_vec, other_vec) >= SIMILARITY_THRESHOLD
         ]
         scores.sort(reverse=True)
-        top = scores[:TOP_K]
 
-        if not top:
+        # wiki-links resolve by note name, so keep each name once
+        names = []
+        for _, p in scores:
+            name = os.path.splitext(os.path.basename(p))[0]
+            if name not in names:
+                names.append(name)
+            if len(names) == TOP_K:
+                break
+
+        if not names:
             continue
 
-        names = [os.path.splitext(os.path.basename(p))[0] for _, p in top]
         print(f"  Linking: {current_path} -> {names}")
         if append_related_notes(full_path, names):
             updates += 1
