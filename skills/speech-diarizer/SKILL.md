@@ -155,6 +155,16 @@ machinery, never in the output dir:
 
 the script overwrites files of the same name. write to a fresh `-o` dir to preserve prior runs.
 
+### timestamps per sentence
+
+the `.md` merges a speaker's turn into one block with one timestamp. when you need to point at exact moments (a quote, a joke, a note about a line), run with `--json` and then:
+
+```bash
+uv run --script speech-diarizer/scripts/sentences.py /path/to/out/<name>.json
+```
+
+it prints one `[mm:ss] SPEAKER: sentence` line per sentence (`--no-speakers` drops the label). runs whisper left unpunctuated stay as one line; split them by word timing from the `.json` if needed.
+
 ## failure handling
 
 - if no token is found (`HF_TOKEN` unset and no `--hf-token`), the script exits with setup instructions. try `source .env` first.
