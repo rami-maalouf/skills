@@ -20,6 +20,13 @@ STATE="$STATE_DIR/.processed"
 
 mkdir -p "$HOME/.mac-automations" "$STATE_DIR" "$LOG_DIR" "$HOME/Library/LaunchAgents"
 
+# never reinstall under a live debrief: zsh reads a running script lazily, so copying over it
+# corrupts the run, and bootout kills it before its lock is released.
+while launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q "state = running"; do
+  echo "a debrief is running - waiting for it to finish before reinstalling (ctrl-c to abort)..."
+  sleep 15
+done
+
 # replace any old symlink-into-Documents with a REAL directory of copies
 [[ -L "$RUNTIME" ]] && rm -f "$RUNTIME"
 mkdir -p "$RUNTIME"

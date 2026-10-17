@@ -1,17 +1,21 @@
 #!/bin/zsh
 # run-debrief.sh <transcript.md>
-# runs the 3-skill debrief chain headlessly via `claude -p` and notifies on completion.
+# runs the 3-skill debrief chain headlessly and notifies on completion. engines are tried
+# in order until one writes the report: claude (opus 5.5) first, codex as the backup.
 # safe to run by hand: ./run-debrief.sh /path/to/transcript.md
 set -euo pipefail
 
 CLAUDE="/Users/rami/.local/bin/claude"
+CODEX="/opt/homebrew/bin/codex"
 LIFE_OS="/Users/rami/Documents/life-os"
 VAULT="/Users/rami/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian"
 TRANSCRIPTS_ROOT="/Users/rami/Documents/transcriptions"
 PROMPT_FILE="${0:A:h}/debrief-prompt.md"
 PRESENTING_CHECK="${0:A:h}/presenting-check.sh"
 NOTIFIER="/opt/homebrew/bin/terminal-notifier"
-MODEL="${DEBRIEF_MODEL:-}"   # empty = use configured default; set DEBRIEF_MODEL=opus for richer reads
+CLAUDE_MODEL="${DEBRIEF_MODEL:-claude-opus-5-5}"
+CODEX_MODEL="${DEBRIEF_CODEX_MODEL:-}"           # empty = codex's configured default
+ENGINES=(${=DEBRIEF_ENGINES:-claude codex})      # e.g. DEBRIEF_ENGINES=codex to test the backup alone
 RETRY="${0:A:h}/retry-debrief.sh"
 
 # the watcher tells us which attempt this is; run by hand both default to 1,
@@ -34,22 +38,47 @@ mkdir -p "$DEBRIEF_DIR"
 # substitute the transcript path into the prompt template (| delimiter; paths have no |)
 PROMPT="$(sed "s|{{TRANSCRIPT}}|$TRANSCRIPT|g" "$PROMPT_FILE")"
 
-echo "[$(date)] starting debrief: $NAME (model=${MODEL:-default})" | tee -a "$RUN_LOG"
+# one headless run of the debrief prompt; all output goes to the run log
+run_engine() {
+  case "$1" in
+    claude)
+      "$CLAUDE" -p "$PROMPT" --dangerously-skip-permissions --model "$CLAUDE_MODEL" \
+        --add-dir "$VAULT" --add-dir "$TRANSCRIPTS_ROOT" ;;
+    codex)
+      # codex has no per-dir grants in this mode; full access matches claude's skip-permissions
+      local model_args=(); [[ -n "$CODEX_MODEL" ]] && model_args=(-m "$CODEX_MODEL")
+      "$CODEX" exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C "$LIFE_OS" \
+        "${model_args[@]}" "$PROMPT" ;;
+    *) echo "unknown engine: $1"; return 2 ;;
+  esac >> "$RUN_LOG" 2>&1 < /dev/null
+}
+engine_model() { [[ $1 == claude ]] && print -r -- "$CLAUDE_MODEL" || print -r -- "${CODEX_MODEL:-default}" }
+# success needs a report written by THIS run, not one left over from an earlier attempt
+report_written_since() { [[ -f "$REPORT" ]] && (( $(stat -f %m "$REPORT") >= $1 )) }
+
+echo "[$(date)] starting debrief: $NAME (engines: ${ENGINES[*]})" | tee -a "$RUN_LOG"
 
 cd "$LIFE_OS"
-ARGS=(-p "$PROMPT" --dangerously-skip-permissions --add-dir "$VAULT" --add-dir "$TRANSCRIPTS_ROOT")
-[[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
-
-set +e
-"$CLAUDE" "${ARGS[@]}" >> "$RUN_LOG" 2>&1
-STATUS=$?
-set -e
+STATUS=1; ENGINE=""
+for engine in "${ENGINES[@]}"; do
+  echo "[$(date)] engine: $engine (model=$(engine_model $engine))" | tee -a "$RUN_LOG"
+  started=$(date +%s)
+  set +e
+  run_engine "$engine"
+  STATUS=$?
+  set -e
+  if (( STATUS == 0 )) && report_written_since $started; then
+    ENGINE=$engine
+    break
+  fi
+  echo "[$(date)] $engine failed (status=$STATUS, report=$(report_written_since $started && echo written || echo missing))" | tee -a "$RUN_LOG"
+done
 
 # decide notification style once: presenting (screen shared AND mic in use) => quiet banner only, no sticky modal
 if "$PRESENTING_CHECK" 2>/dev/null; then PRESENTING=1; else PRESENTING=0; fi
 
-if [[ $STATUS -ne 0 || ! -f "$REPORT" ]]; then
-  echo "[$(date)] FAILED (status=$STATUS, report=$([[ -f $REPORT ]] && echo present || echo missing), attempt=$ATTEMPT/$MAX_ATTEMPTS)" | tee -a "$RUN_LOG"
+if [[ -z "$ENGINE" ]]; then
+  echo "[$(date)] FAILED (all engines: ${ENGINES[*]}, last status=$STATUS, attempt=$ATTEMPT/$MAX_ATTEMPTS)" | tee -a "$RUN_LOG"
 
   if (( ATTEMPT < MAX_ATTEMPTS )); then
     # not the last attempt: log only, no notification of any kind.
@@ -82,10 +111,12 @@ if [[ $STATUS -ne 0 || ! -f "$REPORT" ]]; then
   exit $(( STATUS ? STATUS : 1 ))
 fi
 
-echo "[$(date)] done -> $REPORT" | tee -a "$RUN_LOG"
+echo "[$(date)] done via $ENGINE -> $REPORT" | tee -a "$RUN_LOG"
+MESSAGE="Tap to read the debrief"
+[[ "$ENGINE" != "${ENGINES[1]}" ]] && MESSAGE="$MESSAGE (written by the $ENGINE backup)"
 # 1) audible banner + Notification Center record, shown even during Focus/Do Not Disturb
 [[ -x "$NOTIFIER" ]] && "$NOTIFIER" -title "Call debrief ready" -subtitle "$NAME" \
-  -message "Tap to read the debrief" -sound Hero -ignoreDnD -execute "open '$REPORT'"
+  -message "$MESSAGE" -sound Hero -ignoreDnD -execute "open '$REPORT'"
 # 2) sticky critical alert: stays on screen until you act, opens the report on click.
 # detached so it never blocks the pipeline; survives job exit because the plist sets AbandonProcessGroup.
 # SUPPRESSED while presenting (screen shared + mic in use) so it never pops over a shared screen - the banner still fired above.

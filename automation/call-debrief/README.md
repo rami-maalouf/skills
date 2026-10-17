@@ -6,12 +6,12 @@ an always-on loop that watches for new call transcripts and turns each one into 
 
 1. you finish a call. OpenOats drops a transcript into `~/Documents/transcriptions/OpenOats/`.
 2. a `launchd` agent notices (immediately via WatchPaths, and every 2 min as a fallback) and runs `watch-openoats.sh`. a new file is left alone until it has been quiet for 60s (so a half-written transcript is never processed), then picked up on the next tick - so a debrief typically starts within ~1-3 min of the call ending.
-3. for each new, finished file, `run-debrief.sh` calls `claude -p` headless, which runs three skills and synthesizes one report:
+3. for each new, finished file (newest call first), `run-debrief.sh` runs the chain headless on **Claude Opus 5.5** (`claude -p`). if claude fails or writes no report (session limit, outage), the same prompt runs on **Codex** (`codex exec`) as a backup, and the banner says the backup wrote it. the chain runs three skills and synthesizes one report:
    - **relationship-debrief** (backbone): who was on the call, a per-person read, how you showed up, and what to do better with each person next time.
    - **communication-analysis**: detailed coaching on your own delivery (run on your de-echoed turns).
    - **co-ceo**: a pressure-test of the decisions and plans discussed.
 4. the report is written to `~/Documents/transcriptions/OpenOats/debriefs/<call>.md`.
-5. if the run fails, it is retried silently on the next tick, up to **3 attempts total**. after the 3rd failure the file is **quarantined** - the watcher stops touching it - and you get ONE loud alert that includes the actual error line from the log, with a **Retry now** button. the matching banner stays in Notification Center until dismissed, so tapping it hours later also retries. you can also re-arm from a terminal any time:
+5. if both engines fail, the run is retried silently on the next tick, up to **3 attempts total**. after the 3rd failure the file is **quarantined** - the watcher stops touching it - and you get ONE loud alert that includes the actual error line from the log, with a **Retry now** button. the matching banner stays in Notification Center until dismissed, so tapping it hours later also retries. you can also re-arm from a terminal any time:
 
    ```bash
    # one call (name with or without .md), or no args = everything quarantined
@@ -75,7 +75,8 @@ It prints a CREATED / UPDATED / TASKS ADDED / SKIPPED ledger so you see exactly 
 
 ## knobs
 
-- **model**: defaults to your configured Claude Code model. For richer relationship reads on important calls, set `DEBRIEF_MODEL=opus`. Sonnet is fine and cheaper for routine syncs.
+- **model**: claude runs `claude-opus-5-5` (override with `DEBRIEF_MODEL`). codex runs its configured default from `~/.codex/config.toml` (override with `DEBRIEF_CODEX_MODEL`).
+- **engines**: `DEBRIEF_ENGINES` (default `claude codex`) is the order engines are tried in. `DEBRIEF_ENGINES=codex` runs the backup alone; `DEBRIEF_MODEL=bogus-model` makes claude fail fast so you can watch the fallback end to end.
 - **responsiveness**: `StartInterval` (in `install.sh`'s plist, default 120s) is the fallback poll cadence; `OPENOATS_STABLE_SECONDS` (default 60) is how long a file must be quiet before processing. Re-run `install.sh` after changing the interval.
 - **prompt / chain**: edit `debrief-prompt.md` to change what runs, then re-run `install.sh` to sync it to the runtime copy.
 
@@ -103,4 +104,6 @@ It prints a CREATED / UPDATED / TASKS ADDED / SKIPPED ledger so you see exactly 
 
 - runs unattended with `--dangerously-skip-permissions` and `--add-dir` scoped to the vault and the transcriptions folder - required for a headless agent that writes files with no human to approve prompts. the prompt is fixed and the inputs are your own transcripts.
 - launchd will not start a second copy of the job while one is running, and the script also holds a lock - so overlapping triggers never double-process. a file that appears mid-run is caught on the next tick after the run finishes.
+- the lock (`.lock/pid` in the state dir) records its owner. if that process is gone - a run killed mid-debrief never reaches its cleanup trap - the next tick takes the lock over and logs `stale lock ... taking it over` to `watch.out.log`. before this, one killed run on 2026-07-16 left a lock that made every later run exit silently until 2026-10-16.
+- `install.sh` waits for an active debrief to finish before it copies scripts or reloads the agent, so reinstalling never kills a run.
 - each run costs tokens (a full transcript through three skills). tune the model or trim the chain in `debrief-prompt.md` if it adds up.

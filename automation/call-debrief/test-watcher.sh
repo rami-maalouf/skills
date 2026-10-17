@@ -84,6 +84,41 @@ print -r -- 3 > "$SD/failures/a.md.count"; print -r -- 3 > "$SD/failures/b.md.co
 run_retry
 check "a re-armed" "none" "$(failcount a.md)"; check "b re-armed" "none" "$(failcount b.md)"
 
+lock_gone() { [[ -e "$SD/.lock" ]] && echo no || echo yes }
+
+print -r -- "11. a normal run releases its lock"
+: > "$CALLS"; run_watcher; check "lock removed after run" "yes" "$(lock_gone)"
+
+print -r -- "12. a lock left by a killed run (dead pid) is taken over"
+touch -t $OLD "$WD/after-kill.md"
+zsh -c 'exit 0' & dead=$!; wait $dead
+mkdir -p "$SD/.lock"; print -r -- $dead > "$SD/.lock/pid"; : > "$CALLS"; run_watcher
+check "runner called despite stale lock" "1" "$(calls)"; check "recorded" "yes" "$(recorded after-kill.md)"
+check "stale lock cleaned up" "yes" "$(lock_gone)"
+
+print -r -- "13. a legacy pid-less lock older than 30s is taken over (the jul-oct 2026 stall)"
+touch -t $OLD "$WD/legacy.md"
+mkdir -p "$SD/.lock"; touch -t $OLD "$SD/.lock"; : > "$CALLS"; run_watcher
+check "runner called" "1" "$(calls)"; check "recorded" "yes" "$(recorded legacy.md)"
+
+print -r -- "14. a pid reused by an unrelated process does not hold the lock"
+touch -t $OLD "$WD/reused.md"
+mkdir -p "$SD/.lock"; print -r -- $$ > "$SD/.lock/pid"; : > "$CALLS"; run_watcher
+check "runner called" "1" "$(calls)"; check "recorded" "yes" "$(recorded reused.md)"
+
+print -r -- "15. a lock held by a live watcher is respected"
+touch -t $OLD "$WD/busy.md"
+print -r -- 'sleep 30; :' > "$TMP/watch-openoats-live.sh"
+zsh "$TMP/watch-openoats-live.sh" & live=$!
+mkdir -p "$SD/.lock"; print -r -- $live > "$SD/.lock/pid"; : > "$CALLS"; run_watcher
+check "runner NOT called" "0" "$(calls)"; check "lock kept" "no" "$(lock_gone)"
+kill $live 2>/dev/null; wait $live 2>/dev/null
+: > "$CALLS"; run_watcher; check "processed once the owner is gone" "yes" "$(recorded busy.md)"
+
+print -r -- "16. pending calls run newest first"
+touch -t $OLD "$WD/2026-10-01-0900-old.md" "$WD/2026-10-16-1700-new.md"; : > "$CALLS"; run_watcher
+check "newest call first" "2026-10-16-1700-new.md attempt=1/3" "$(sed -n 1p "$CALLS")"
+
 print -r -- ""
 print -r -- "===== $PASS passed, $FAIL failed ====="
 [[ $FAIL -eq 0 ]]
