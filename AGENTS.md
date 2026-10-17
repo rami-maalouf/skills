@@ -76,6 +76,16 @@ CONCERNS:
 
 ## Systems-First approach
 
+### First-pass interface quality
+
+- Treat visual design as part of implementing a UI, without waiting for a request to make it look better.
+- Before building the layout, choose the platform pattern, primary task, visual focal point, information hierarchy, and intended window or viewport size. For native utilities, start with platform typography, semantic colors, and familiar controls.
+- Compose the whole screen before accumulating controls. Group related settings, use consistent spacing, and show actions appropriate to the current state. Keep secondary and destructive actions below the primary action in emphasis.
+- Native controls provide correct widgets, not a finished composition. Check density, alignment, whitespace, typography, and whether the primary action is immediately obvious.
+- Inspect screenshots of the actual rendered target after building. Cover the initial state and materially different active, empty, success, and error states, including narrow layouts and supported appearances. Fix visible problems before delivery.
+- Confirm the launched app contains the latest changes. A successful test build, accessibility tree, or component test does not prove that the shipped screen looks good.
+- Use concrete visual acceptance criteria for the task. Do not substitute claims such as "polished" or "pixel perfect" for inspecting the result. State any visual verification that could not be completed.
+
 For complex features, iterate on the system design before writing code:
 
 - What are the boundaries? What should each component know/not know?
