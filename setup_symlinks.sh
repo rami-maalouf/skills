@@ -54,6 +54,7 @@ link_collection_skill() {
 link_skill_collections() {
     local collection_dir
     local collection_name
+    local collection_path
     local target_dir
     local skill_name
 
@@ -62,6 +63,12 @@ link_skill_collections() {
 
         collection_name="$(basename "$collection_dir")"
         target_dir="$WORKSPACE_DIR/$collection_name"
+
+        # an optional "path" file places the workspace below the root (e.g. creative-arts/storytelling)
+        if [ -f "$collection_dir/path" ]; then
+            read -r collection_path < "$collection_dir/path"
+            target_dir="$WORKSPACE_DIR/$collection_path"
+        fi
 
         echo "Linking skill collection: $collection_name..."
         mkdir -p "$target_dir/.agents/skills"

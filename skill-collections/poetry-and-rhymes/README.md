@@ -1,4 +1,4 @@
-# Music Creation and Poems
+# Poetry and Rhymes
 
 This workspace is for writing rhymes, rap verses, songs, and poems over
 instrumentals, with an agent as a writing partner. Start with `AGENTS.md`: it

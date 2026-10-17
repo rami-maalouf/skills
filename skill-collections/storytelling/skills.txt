@@ -1,0 +1,6 @@
+# one canonical skill name per line
+obsidian-search
+thought-partner
+rami-voice
+speech-diarizer
+speech-video-transcriber
