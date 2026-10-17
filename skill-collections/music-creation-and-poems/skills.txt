@@ -3,3 +3,4 @@ vocal-remover
 thought-partner
 rami-voice
 obsidian-search
+speech-video-transcriber
