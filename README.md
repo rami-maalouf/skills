@@ -34,7 +34,9 @@ Installed skills and their source are tracked in `skills-lock.json`, which
 
 [`t3-fork`](skills/t3-fork) forks a T3 Code (the desktop AI coding app by Theo)
 conversation into a new thread with the full prior context, optionally
-branching from an earlier turn.
+branching from an earlier turn or moving to a different agent. It is a thin
+wrapper over T3's own fork command, so it needs T3 Code beta and its `t3-code`
+MCP tools.
 
 ```bash
 $ npx skills add rami-maalouf/skills -s t3-fork -g
@@ -45,8 +47,8 @@ $ npx skills add rami-maalouf/skills -s t3-fork -g
 ╰────────────────────────────────╯
 ```
 
-Once installed, it shows up as `/t3-fork` in Claude Code. Typing `/t3-fork`, or
-just asking to "fork this conversation" or "branch this chat", runs it.
+Once installed, it shows up as `/t3-fork` in Claude Code. It is manual only:
+type `/t3-fork` to run it.
 
 ## Repo layout
 
