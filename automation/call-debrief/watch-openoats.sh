@@ -11,9 +11,11 @@ RUNNER="${OPENOATS_RUNNER:-${0:A:h}/run-debrief.sh}"
 STATE_DIR="${OPENOATS_STATE_DIR:-$HOME/Library/Application Support/openoats-debrief}"
 STATE="$STATE_DIR/.processed"
 LOCK="$STATE_DIR/.lock"
+FAIL_DIR="$STATE_DIR/failures"                     # <file>.count per failing transcript
 STABLE_SECONDS="${OPENOATS_STABLE_SECONDS:-60}"   # leave a file alone until it has been quiet this long
+MAX_ATTEMPTS="${OPENOATS_MAX_ATTEMPTS:-3}"        # after this many failures, quarantine until retry-debrief.sh
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$FAIL_DIR"
 touch "$STATE"
 
 # single-instance lock: WatchPaths + StartInterval can fire overlapping runs.
@@ -27,9 +29,15 @@ now=$(date +%s)
 for f in "$WATCH_DIR"/*.md; do
   base="${f:t}"
   grep -qxF "$base" "$STATE" && continue           # already done
+  countfile="$FAIL_DIR/$base.count"
+  fails=0; [[ -f "$countfile" ]] && fails=$(<"$countfile")
+  (( fails >= MAX_ATTEMPTS )) && continue           # gave up; retry-debrief.sh re-arms it
   mtime=$(stat -f %m "$f" 2>/dev/null) || continue  # vanished mid-scan; skip
   (( now - mtime < STABLE_SECONDS )) && continue    # still settling; a later run gets it
-  if "$RUNNER" "$f"; then
+  if OPENOATS_ATTEMPT=$((fails + 1)) OPENOATS_MAX_ATTEMPTS="$MAX_ATTEMPTS" "$RUNNER" "$f"; then
     print -r -- "$base" >> "$STATE"
+    rm -f "$countfile"
+  else
+    print -r -- $((fails + 1)) > "$countfile"
   fi
 done

@@ -23,7 +23,7 @@ mkdir -p "$HOME/.mac-automations" "$STATE_DIR" "$LOG_DIR" "$HOME/Library/LaunchA
 # replace any old symlink-into-Documents with a REAL directory of copies
 [[ -L "$RUNTIME" ]] && rm -f "$RUNTIME"
 mkdir -p "$RUNTIME"
-cp "$REPO_DIR"/{watch-openoats.sh,run-debrief.sh,apply-proposals.sh,presenting-check.sh,debrief-prompt.md,apply-proposals-prompt.md} "$RUNTIME"/
+cp "$REPO_DIR"/{watch-openoats.sh,run-debrief.sh,retry-debrief.sh,apply-proposals.sh,presenting-check.sh,debrief-prompt.md,apply-proposals-prompt.md} "$RUNTIME"/
 chmod +x "$RUNTIME"/*.sh
 
 # seed state with the existing backlog so first load does NOT debrief old calls
@@ -76,3 +76,4 @@ echo "  press Cmd+Shift+G, enter /bin/zsh, Open, ensure the toggle is ON."
 echo "  (without this, the agent can see filenames but cannot read transcripts or write the vault.)"
 echo ""
 echo "stop it:    launchctl bootout gui/$(id -u)/$LABEL"
+echo "retry a gave-up debrief: $RUNTIME/retry-debrief.sh [name]   (no args = all quarantined)"

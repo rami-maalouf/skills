@@ -12,6 +12,12 @@ PROMPT_FILE="${0:A:h}/debrief-prompt.md"
 PRESENTING_CHECK="${0:A:h}/presenting-check.sh"
 NOTIFIER="/opt/homebrew/bin/terminal-notifier"
 MODEL="${DEBRIEF_MODEL:-}"   # empty = use configured default; set DEBRIEF_MODEL=opus for richer reads
+RETRY="${0:A:h}/retry-debrief.sh"
+
+# the watcher tells us which attempt this is; run by hand both default to 1,
+# so a manual failure goes straight to the loud, reason-bearing alert.
+ATTEMPT="${OPENOATS_ATTEMPT:-1}"
+MAX_ATTEMPTS="${OPENOATS_MAX_ATTEMPTS:-1}"
 
 LOG_DIR="$HOME/Library/Logs/OpenOatsDebrief"
 mkdir -p "$LOG_DIR"
@@ -43,18 +49,37 @@ set -e
 if "$PRESENTING_CHECK" 2>/dev/null; then PRESENTING=1; else PRESENTING=0; fi
 
 if [[ $STATUS -ne 0 || ! -f "$REPORT" ]]; then
-  echo "[$(date)] FAILED (status=$STATUS, report=$([[ -f $REPORT ]] && echo present || echo missing))" | tee -a "$RUN_LOG"
-  # audible, DnD-piercing banner + a sticky critical alert that opens the log on click
-  [[ -x "$NOTIFIER" ]] && "$NOTIFIER" -title "Call debrief FAILED" -subtitle "$NAME" \
-    -message "See $RUN_LOG" -sound Basso -ignoreDnD
+  echo "[$(date)] FAILED (status=$STATUS, report=$([[ -f $REPORT ]] && echo present || echo missing), attempt=$ATTEMPT/$MAX_ATTEMPTS)" | tee -a "$RUN_LOG"
+
+  if (( ATTEMPT < MAX_ATTEMPTS )); then
+    # not the last attempt: log only, no notification of any kind.
+    # the watcher retries on its next tick; the user only hears about it if all attempts fail.
+    exit $(( STATUS ? STATUS : 1 ))
+  fi
+
+  # final attempt: pull the last real error line out of the log so the alert says WHY,
+  # then notify loudly ONCE. the watcher quarantines this file - nothing runs again until
+  # retry-debrief.sh clears it, which is exactly what the notification click/buttons do.
+  REASON=""
+  for line in "${(f)$(<"$RUN_LOG")}"; do
+    [[ -n "${line// /}" && "$line" != \[* ]] && REASON="$line"
+  done
+  REASON=$(print -r -- "$REASON" | LC_ALL=C tr -d '"\\`$')
+  REASON="${REASON[1,220]}"
+  [[ -n "$REASON" ]] || REASON="no error output captured - open the log"
+
+  # the banner stays in notification center until dismissed, so tapping it hours later still retries
+  [[ -x "$NOTIFIER" ]] && "$NOTIFIER" -title "Call debrief gave up ($ATTEMPT attempts) - tap to retry" \
+    -subtitle "$NAME" -message "$REASON" -sound Basso -ignoreDnD -execute "'$RETRY' '$NAME'"
   if [[ $PRESENTING -eq 0 ]]; then
     nohup osascript \
-      -e "set r to button returned of (display alert \"Call debrief FAILED\" message \"$NAME could not be debriefed.\" as critical buttons {\"OK\", \"Open log\"} default button \"OK\" giving up after 14400)" \
+      -e "set r to button returned of (display alert \"Call debrief gave up after $ATTEMPT attempts\" message \"$NAME\n\nreason: $REASON\n\nauto-retries are paused for this call. retry whenever you want: the Retry button here, the banner in Notification Center, or retry-debrief.sh\" as critical buttons {\"Dismiss\", \"Open log\", \"Retry now\"} default button \"Retry now\" giving up after 14400)" \
       -e "if r is \"Open log\" then do shell script \"open \" & quoted form of \"$RUN_LOG\"" \
+      -e "if r is \"Retry now\" then do shell script \"'$RETRY' '$NAME'\"" \
       >/dev/null 2>&1 &
     disown 2>/dev/null || true
   fi
-  exit "${STATUS:-1}"
+  exit $(( STATUS ? STATUS : 1 ))
 fi
 
 echo "[$(date)] done -> $REPORT" | tee -a "$RUN_LOG"

@@ -11,7 +11,15 @@ an always-on loop that watches for new call transcripts and turns each one into 
    - **communication-analysis**: detailed coaching on your own delivery (run on your de-echoed turns).
    - **co-ceo**: a pressure-test of the decisions and plans discussed.
 4. the report is written to `~/Documents/transcriptions/OpenOats/debriefs/<call>.md`.
-5. you're alerted two ways: an audible banner (pierces Focus/Do Not Disturb) and a **sticky critical alert that stays on screen until you act** - click "Open debrief" to open the report. (macOS has no scriptable "priority level" beyond this; true Time Sensitive/Critical alerts need Apple entitlements a shell tool can't have. The critical modal alert is the max, and it survives because the launchd plist sets `AbandonProcessGroup`.)
+5. if the run fails, it is retried silently on the next tick, up to **3 attempts total**. after the 3rd failure the file is **quarantined** - the watcher stops touching it - and you get ONE loud alert that includes the actual error line from the log, with a **Retry now** button. the matching banner stays in Notification Center until dismissed, so tapping it hours later also retries. you can also re-arm from a terminal any time:
+
+   ```bash
+   # one call (name with or without .md), or no args = everything quarantined
+   ~/.mac-automations/openoats-debrief/retry-debrief.sh [<call-name>]
+   ```
+
+   a retry gets a fresh budget of 3 attempts. the retry goes through `launchctl kickstart`, so it runs in the launchd agent's own Full-Disk-Access context regardless of who clicked.
+6. you're alerted two ways: an audible banner (pierces Focus/Do Not Disturb) and a **sticky critical alert that stays on screen until you act** - click "Open debrief" to open the report. (macOS has no scriptable "priority level" beyond this; true Time Sensitive/Critical alerts need Apple entitlements a shell tool can't have. The critical modal alert is the max, and it survives because the launchd plist sets `AbandonProcessGroup`.)
    - **while presenting**, the sticky modal is suppressed and you get only the quiet banner - so nothing pops over a shared screen. `presenting-check.sh` decides this by checking whether one of your meeting apps is **actively using the mic right now** (Zoom, Zen/Google Meet, Slack huddle, Screen Studio, OpenOats) - a far more reliable signal than "screen is shared" (macOS won't expose that) or "app is open" (Zen is always open) or "mic busy" (system/streaming apps hold the mic when you're not on a call). It uses the CoreAudio per-process input API, so an app only counts when it's genuinely in a call. For anything not covered, `touch ~/.openoats-presenting` forces quiet mode (delete when done).
 
 ## requirements (macOS Full Disk Access)
@@ -38,7 +46,7 @@ The scripts live in this repo (source of truth). `install.sh` **copies** them to
 ## tests
 
 ```bash
-# unit-tests the watcher logic (new-file detection, freshness skip, dedup, retry, lock) in a
+# unit-tests the watcher logic (new-file detection, freshness skip, dedup, retry, quarantine, re-arm, lock) in a
 # sandbox with a stub runner - no claude calls, no real dirs. exits non-zero on any failure.
 zsh ai-agents-config/automation/call-debrief/test-watcher.sh
 ```
@@ -77,7 +85,8 @@ It prints a CREATED / UPDATED / TASKS ADDED / SKIPPED ledger so you see exactly 
 |---|---|
 | `debrief-prompt.md` | the orchestration prompt the headless run follows |
 | `run-debrief.sh` | runs the chain on one transcript, then notifies |
-| `watch-openoats.sh` | finds new+finished transcripts, calls the runner, tracks state (paths overridable via `OPENOATS_*` env for testing) |
+| `watch-openoats.sh` | finds new+finished transcripts, calls the runner, tracks state + failure counts (paths overridable via `OPENOATS_*` env for testing) |
+| `retry-debrief.sh` | re-arms quarantined (3x-failed) debriefs and kickstarts the watcher; wired to the failure notification's click/buttons |
 | `apply-proposals.sh` + `apply-proposals-prompt.md` | applies a report's per-person CRM proposals (additive; `--dry-run`) |
 | `test-watcher.sh` | unit tests for the watcher logic |
 | `install.sh` | copies runtime out of ~/Documents, seeds state, installs the launchd agent |
@@ -85,8 +94,10 @@ It prints a CREATED / UPDATED / TASKS ADDED / SKIPPED ledger so you see exactly 
 ## state & logs
 
 - processed-file ledger: `~/Library/Application Support/openoats-debrief/.processed`
+- failure counters: `~/Library/Application Support/openoats-debrief/failures/<call>.md.count` (3 = quarantined; cleared by success or `retry-debrief.sh`)
 - logs: `~/Library/Logs/OpenOatsDebrief/` (`watch.*.log`, and `<call>.log` per run)
 - to re-debrief a call: delete its line from `.processed`; it is picked up within ~2 min.
+- max attempts knob: `OPENOATS_MAX_ATTEMPTS` (default 3; set it in the plist env if you ever want a different budget).
 
 ## notes
 

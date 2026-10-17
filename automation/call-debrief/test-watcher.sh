@@ -4,6 +4,7 @@
 set -uo pipefail
 
 SCRIPT="${0:A:h}/watch-openoats.sh"
+RETRY_SCRIPT="${0:A:h}/retry-debrief.sh"
 PASS=0; FAIL=0
 TMP=$(mktemp -d /tmp/openoats-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
@@ -13,7 +14,7 @@ mkdir -p "$WD" "$SD"
 STUB="$TMP/stub-runner.sh"
 cat > "$STUB" <<'EOF'
 #!/bin/zsh
-print -r -- "${1:t}" >> "$CALLS_FILE"
+print -r -- "${1:t} attempt=${OPENOATS_ATTEMPT:-?}/${OPENOATS_MAX_ATTEMPTS:-?}" >> "$CALLS_FILE"
 exit "${STUB_EXIT:-0}"
 EOF
 chmod +x "$STUB"
@@ -25,7 +26,10 @@ run_watcher() {  # arg1 = stub exit code (default 0)
 }
 check() { if [[ "$2" == "$3" ]]; then print -r -- "  PASS: $1"; PASS=$((PASS+1)); else print -r -- "  FAIL: $1 (expected [$2], got [$3])"; FAIL=$((FAIL+1)); fi }
 calls() { [[ -f "$CALLS" ]] && wc -l < "$CALLS" | tr -d ' ' || echo 0 }
+last_call() { [[ -s "$CALLS" ]] && print -r -- "${$(<"$CALLS")##*$'\n'}" || echo none }
 recorded() { grep -qxF "$1" "$SD/.processed" 2>/dev/null && echo yes || echo no }
+failcount() { [[ -f "$SD/failures/$1.count" ]] && print -r -- "$(<"$SD/failures/$1.count")" || echo none }
+run_retry() { OPENOATS_STATE_DIR="$SD" OPENOATS_NO_KICK=1 zsh "$RETRY_SCRIPT" "$@" >/dev/null }
 OLD="202601010000"   # a timestamp well in the past = "stable"
 
 print -r -- "1. empty watch dir"
@@ -49,12 +53,36 @@ print -r -- "5. already-processed files are never re-run"
 print -r -- "6. a failed run is NOT recorded, and retries next time"
 touch -t $OLD "$WD/flaky.md"; : > "$CALLS"; run_watcher 1
 check "runner called" "1" "$(calls)"; check "NOT recorded after failure" "no" "$(recorded flaky.md)"
+check "failure counted" "1" "$(failcount flaky.md)"
 : > "$CALLS"; run_watcher 0
 check "retried" "1" "$(calls)"; check "recorded after success" "yes" "$(recorded flaky.md)"
+check "counter cleared on success" "none" "$(failcount flaky.md)"
 
 print -r -- "7. a held lock prevents any processing (no double-runs)"
 touch -t $OLD "$WD/locked.md"; mkdir -p "$SD/.lock"; : > "$CALLS"; run_watcher
 check "runner NOT called while locked" "0" "$(calls)"; rmdir "$SD/.lock"
+: > "$CALLS"; run_watcher   # drain locked.md so later tests start clean
+
+print -r -- "8. three failures quarantine the file - no fourth attempt"
+touch -t $OLD "$WD/broken.md"
+: > "$CALLS"; run_watcher 1; check "attempt 1 passed to runner" "broken.md attempt=1/3" "$(last_call)"
+: > "$CALLS"; run_watcher 1; check "attempt 2 passed to runner" "broken.md attempt=2/3" "$(last_call)"
+: > "$CALLS"; run_watcher 1; check "attempt 3 passed to runner" "broken.md attempt=3/3" "$(last_call)"
+check "counter at 3" "3" "$(failcount broken.md)"
+: > "$CALLS"; run_watcher 1
+check "quarantined: runner NOT called again" "0" "$(calls)"
+
+print -r -- "9. retry-debrief.sh re-arms it (works with or without .md suffix)"
+run_retry broken
+check "counter cleared" "none" "$(failcount broken.md)"
+: > "$CALLS"; run_watcher 0
+check "re-ran after retry, fresh attempt 1" "broken.md attempt=1/3" "$(last_call)"
+check "recorded after success" "yes" "$(recorded broken.md)"
+
+print -r -- "10. retry-debrief.sh with no args clears ALL quarantined files"
+print -r -- 3 > "$SD/failures/a.md.count"; print -r -- 3 > "$SD/failures/b.md.count"
+run_retry
+check "a re-armed" "none" "$(failcount a.md)"; check "b re-armed" "none" "$(failcount b.md)"
 
 print -r -- ""
 print -r -- "===== $PASS passed, $FAIL failed ====="
