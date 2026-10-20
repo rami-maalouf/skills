@@ -133,7 +133,7 @@ mkdir -p ~/.gemini/antigravity
 # via ~/.agents/skills, with ~/.claude/skills pointing at that
 echo "Linking global skills..."
 mkdir -p ~/.agents/skills ~/.claude/skills
-for skill_name in t3-fork co-ceo metacognitive-architect thought-partner; do
+for skill_name in t3-fork co-ceo metacognitive-architect thought-partner read-aloud; do
     safe_link "$CONFIG_DIR/skills/$skill_name" ~/.agents/skills/"$skill_name"
     safe_link "../../.agents/skills/$skill_name" ~/.claude/skills/"$skill_name"
 done
