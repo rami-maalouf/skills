@@ -57,6 +57,17 @@ def _parse_ajson_file(filepath):
     return entries
 
 
+SF_DATALESS = 0x40000000  # macos flag: file content lives only in icloud
+
+
+def _is_dataless(filepath):
+    """True when icloud has evicted the file and only a placeholder is on disk."""
+    try:
+        return bool(getattr(os.stat(filepath), "st_flags", 0) & SF_DATALESS)
+    except OSError:
+        return False
+
+
 EMBED_DIM = 384  # TaylorAI/bge-micro-v2
 
 
@@ -128,7 +139,13 @@ def load_note_embeddings(vault_root, model=DEFAULT_MODEL):
     for filename in os.listdir(smart_env):
         if not filename.endswith(".ajson"):
             continue
-        entries = _parse_ajson_file(os.path.join(smart_env, filename))
+        filepath = os.path.join(smart_env, filename)
+        # the legacy files stopped updating on 2026-10-02, so icloud evicts
+        # them. reading an evicted file blocks on a download, one file at a
+        # time, which stalls the linker for many minutes. skip them.
+        if _is_dataless(filepath):
+            continue
+        entries = _parse_ajson_file(filepath)
         for key, val in entries.items():
             if not key.startswith("smart_sources:"):
                 continue
@@ -157,7 +174,10 @@ def load_block_embeddings(vault_root, model=DEFAULT_MODEL):
     for filename in os.listdir(smart_env):
         if not filename.endswith(".ajson"):
             continue
-        entries = _parse_ajson_file(os.path.join(smart_env, filename))
+        filepath = os.path.join(smart_env, filename)
+        if _is_dataless(filepath):
+            continue
+        entries = _parse_ajson_file(filepath)
         for key, val in entries.items():
             if not key.startswith("smart_blocks:"):
                 continue
