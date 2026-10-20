@@ -1,230 +1,252 @@
-import os
-import csv
+"""turn letterly magic rewrites fetched through the letterly mcp into obsidian notes.
+
+the agent owns fetching (only an agent can call the mcp). this script owns structure:
+the sync window, duplicate checks, the text length check, and the note format.
+
+batch dir layout (written by the agent):
+  manifest.json      {"notes": [{"note_id", "rewrite_id", "title", "created", "tags", "chars"}]}
+  <rewrite_id>.txt   the full rewrite text, exactly as letterly returned it
+"""
+import argparse
 import json
+import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+LOOKBACK_DAYS = 7
+# leading and trailing whitespace may differ from letterly's count, nothing else may
+LENGTH_TOLERANCE = 2
+CREATED_RE = re.compile(r"^Created:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", re.MULTILINE)
+REWRITE_ID_RE = re.compile(r"^letterly_rewrite_id:\s*(\d+)", re.MULTILINE)
+
 
 def get_vault_root():
     candidates = [
         os.getcwd(),
         "/Users/rami/Documents/life-os/Obsidian",
-        "/Users/rami/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian"
+        "/Users/rami/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian",
     ]
     for c in candidates:
         if os.path.exists(os.path.join(c, ".smart-env")):
             return c
     return os.getcwd()
 
+
+def note_dirs(vault_root):
+    return [
+        os.path.join(vault_root, "unprocessed"),
+        os.path.join(vault_root, "My Outputs/Transcriptions"),
+    ]
+
+
+def read_frontmatter(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read(4000)
+    except OSError:
+        return ""
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    return text[:end] if end != -1 else ""
+
+
+def scan_vault(vault_root):
+    """return (newest created datetime, known rewrite ids, known file names)."""
+    newest = None
+    rewrite_ids = set()
+    filenames = set()
+    for directory in note_dirs(vault_root):
+        if not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            if not name.endswith(".md"):
+                continue
+            filenames.add(name)
+            frontmatter = read_frontmatter(os.path.join(directory, name))
+            created = CREATED_RE.search(frontmatter)
+            if created:
+                value = datetime.fromisoformat(created.group(1))
+                if newest is None or value > newest:
+                    newest = value
+            rewrite_id = REWRITE_ID_RE.search(frontmatter)
+            if rewrite_id:
+                rewrite_ids.add(int(rewrite_id.group(1)))
+    return newest, rewrite_ids, filenames
+
+
 def sanitize_filename(name):
-    """Removes characters that are illegal in file names."""
+    """removes characters that are illegal in file names."""
     sanitized = re.sub(r'[\/*?:"<>|]', "", name)
     return sanitized.strip()[:200]
 
-def format_date(date_str):
-    """Converts DD.MM.YYYY HH:MM:SS to YYYY-MM-DDTHH:MM:SS."""
-    try:
-        dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M:%S")
-        return dt.strftime("%Y-%m-%dT%H:%M:%S")
-    except (ValueError, TypeError):
-        return date_str
 
-def row_value(row, *names):
-    lookup = {str(key).strip().lower(): value for key, value in row.items() if key}
-    for name in names:
-        value = lookup.get(name.lower())
-        if value is not None:
-            return value
-    return ""
+def note_filename(item, text):
+    title = str(item.get("title") or "").strip()
+    if not title or title == "Untitled":
+        title = " ".join(text.split()[:5]) or "Untitled Note"
+    return sanitize_filename(title) + ".md"
 
-def note_id(row):
-    return row_value(row, 'id', 'note_id', 'noteid', 'note id', 'uuid', 'note_uuid', 'note uuid').strip()
 
-def normalized_title(row):
-    return row_value(row, 'title').strip().casefold()
+def created_iso(created_ms):
+    # letterly timestamps are utc epoch ms; the vault stores utc without an offset
+    return datetime.fromtimestamp(int(created_ms) / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
-def is_magic_rewrite(row):
-    rewrite_type = (row_value(row, 'rewrite_type') or "").lower()
-    return 'magic' in rewrite_type
-
-def is_original_note(row):
-    row_type = (row_value(row, 'type') or "").strip().lower()
-    rewrite_type = (row_value(row, 'rewrite_type') or "").strip().lower()
-    if row_type == "note" and not rewrite_type:
-        return True
-    return not row_type and not rewrite_type
-
-def normalize_letterly_tag(value):
-    tag = str(value).strip()
-    if not tag:
-        return ""
-    return tag.removeprefix("#").strip()
-
-def parse_letterly_tags(raw_tags):
-    raw = str(raw_tags or "").strip()
-    if not raw:
-        return []
-
-    candidates = []
-    if raw.startswith("["):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = None
-
-        if isinstance(parsed, list):
-            for item in parsed:
-                if isinstance(item, dict):
-                    candidates.append(item.get("name") or item.get("title") or item.get("tag") or "")
-                else:
-                    candidates.append(item)
-
-    if not candidates:
-        for separator in [",", ";", "|", "\n"]:
-            if separator in raw:
-                candidates = raw.split(separator)
-                break
-
-    if not candidates:
-        candidates = [part for part in raw.split("#") if part.strip()] if raw.count("#") > 1 else [raw]
-
-    tags = []
-    seen = set()
-    for candidate in candidates:
-        tag = normalize_letterly_tag(candidate)
-        if tag and tag not in seen:
-            tags.append(tag)
-            seen.add(tag)
-    return tags
 
 def yaml_scalar(value):
     return json.dumps(str(value), ensure_ascii=False)
 
+
 def yaml_list(field, values):
     if not values:
         return f"{field}: []"
-
     lines = [f"{field}:"]
     for value in values:
         lines.append(f"  - {yaml_scalar(value)}")
     return "\n".join(lines)
 
-def build_original_note_indexes(rows):
-    originals_by_id = {}
-    originals_by_title = {}
 
-    for row in rows:
-        if not is_original_note(row):
-            continue
+def clean_tags(tags):
+    result = []
+    for tag in tags or []:
+        tag = str(tag).strip().removeprefix("#").strip()
+        if tag and tag not in result:
+            result.append(tag)
+    return result
 
-        row_id = note_id(row)
-        if row_id and row_id not in originals_by_id:
-            originals_by_id[row_id] = row
 
-        title = normalized_title(row)
-        if title and title not in originals_by_title:
-            originals_by_title[title] = row
-
-    return originals_by_id, originals_by_title
-
-def find_original_note(row, originals_by_id, originals_by_title):
-    row_id = note_id(row)
-    if row_id and row_id in originals_by_id:
-        return originals_by_id[row_id]
-
-    title = normalized_title(row)
-    if title and title in originals_by_title:
-        return originals_by_title[title]
-
-    return None
-
-def process_letterly_csv(vault_root):
-    # paths
-    unprocessed_dir = os.path.join(vault_root, "unprocessed")
-    transcriptions_dir = os.path.join(vault_root, "My Outputs/Transcriptions")
-
-    # ensure directories exist
-    os.makedirs(unprocessed_dir, exist_ok=True)
-    os.makedirs(transcriptions_dir, exist_ok=True)
-
-    # find the most recent CSV
-    try:
-        csv_files = [f for f in os.listdir(unprocessed_dir) if f.endswith(".csv") and f.startswith("Letterly-export")]
-    except FileNotFoundError:
-        print(f"Directory not found: {unprocessed_dir}")
-        return
-
-    if not csv_files:
-        print("No Letterly export CSV found.")
-        return
-
-    csv_files.sort(reverse=True)
-    latest_csv_filename = csv_files[0]
-    latest_csv_path = os.path.join(unprocessed_dir, latest_csv_filename)
-    print(f"Processing latest export: {latest_csv_path}")
-
-    count_created = 0
-    count_skipped = 0
-
-    with open(latest_csv_path, mode='r', encoding='utf-8') as f:
-        rows = list(csv.DictReader(f))
-
-    originals_by_id, originals_by_title = build_original_note_indexes(rows)
-
-    for row in rows:
-        if not is_magic_rewrite(row):
-            continue
-
-        title = row_value(row, 'title').strip()
-        content = row_value(row, 'text').strip()
-        letterly_tags = parse_letterly_tags(row_value(row, 'tags', 'tag', 'letterly_tags'))
-        original_note = find_original_note(row, originals_by_id, originals_by_title)
-        created_at_raw = row_value(original_note or {}, 'created_at') or row_value(row, 'created_at')
-        iso_date = format_date(created_at_raw)
-
-        if not title:
-            title = " ".join(content.split()[:5]) or "Untitled Note"
-
-        safe_title = sanitize_filename(title)
-        filename = safe_title + ".md"
-
-        unprocessed_file_path = os.path.join(unprocessed_dir, filename)
-        transcriptions_file_path = os.path.join(transcriptions_dir, filename)
-
-        if os.path.exists(unprocessed_file_path) or os.path.exists(transcriptions_file_path):
-            count_skipped += 1
-            continue
-
-        note_body = f"""---
+def build_note(item, text):
+    return f"""---
 Status: 🎙️
 tags:
   - note
-{yaml_list("letterly_tags", letterly_tags)}
+{yaml_list("letterly_tags", clean_tags(item.get("tags")))}
+letterly_note_id: {int(item["note_id"])}
+letterly_rewrite_id: {int(item["rewrite_id"])}
 Links:
-Created: {iso_date}
+Created: {created_iso(item["created"])}
 ---
 
-{content}
+{text}
 """
 
-        try:
-            with open(unprocessed_file_path, 'w', encoding='utf-8') as note_file:
-                note_file.write(note_body)
-            print(f"Created in unprocessed: {filename}")
-            count_created += 1
-        except Exception as e:
-            print(f"Error creating {filename}: {e}")
 
-    print("Processing complete.")
-    print(f"New 'magic' notes created: {count_created}")
-    print(f"Existing notes skipped: {count_skipped}")
+def load_manifest(batch_dir):
+    with open(os.path.join(batch_dir, "manifest.json"), encoding="utf-8") as f:
+        notes = json.load(f).get("notes", [])
+    for item in notes:
+        missing = [key for key in ("note_id", "rewrite_id", "title", "created") if key not in item]
+        if missing:
+            raise ValueError(f"manifest entry {item} is missing {', '.join(missing)}")
+    return notes
 
-    try:
-        os.remove(latest_csv_path)
-        print(f"Deleted source CSV: {latest_csv_filename}")
-    except Exception as e:
-        print(f"Error deleting CSV: {e}")
+
+def read_text(batch_dir, item):
+    path = os.path.join(batch_dir, f"{int(item['rewrite_id'])}.txt")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def check_length(item, text):
+    expected = item.get("chars")
+    if expected is None:
+        return "manifest has no chars value from get_rewrite"
+    actual = len(text.strip())
+    if abs(actual - int(expected)) > LENGTH_TOLERANCE:
+        return f"text has {actual} chars but letterly reports {expected}"
+    return None
+
+
+def command_window(args):
+    vault_root = args.vault or get_vault_root()
+    newest, _, _ = scan_vault(vault_root)
+    if newest is None:
+        print("no Created dates found in the vault. pass an explicit date to list_notes.", file=sys.stderr)
+        return 1
+    since = (newest - timedelta(days=args.lookback_days)).date().isoformat()
+    print(json.dumps({"created_after": since, "newest_note": newest.isoformat()}))
+    return 0
+
+
+def command_import(args):
+    vault_root = args.vault or get_vault_root()
+    batch_dir = args.batch_dir
+    unprocessed_dir = os.path.join(vault_root, "unprocessed")
+    os.makedirs(unprocessed_dir, exist_ok=True)
+
+    _, known_ids, known_files = scan_vault(vault_root)
+    notes = load_manifest(batch_dir)
+
+    created, skipped, needs_text, failed = [], [], [], []
+    for item in notes:
+        rewrite_id = int(item["rewrite_id"])
+        title = str(item.get("title") or "")
+        if rewrite_id in known_ids:
+            skipped.append(f"{title} (rewrite {rewrite_id} already in vault)")
+            continue
+
+        # titles are known before the text, so the file name check can run in plan mode too
+        title_filename = note_filename(item, "") if title and title != "Untitled" else None
+        if title_filename and title_filename in known_files:
+            skipped.append(f"{title} (file name already in vault)")
+            continue
+
+        text = read_text(batch_dir, item)
+        if text is None:
+            needs_text.append(item)
+            continue
+        if args.plan:
+            continue
+
+        error = check_length(item, text)
+        if error:
+            failed.append(f"{title}: {error}")
+            continue
+
+        filename = note_filename(item, text)
+        if filename in known_files:
+            skipped.append(f"{title} (file name already in vault)")
+            continue
+
+        with open(os.path.join(unprocessed_dir, filename), "w", encoding="utf-8") as f:
+            f.write(build_note(item, text.strip()))
+        known_files.add(filename)
+        created.append(f"unprocessed/{filename}")
+
+    for line in skipped:
+        print(f"skipped: {line}")
+    for item in needs_text:
+        print(f"needs text: note {int(item['note_id'])} rewrite {int(item['rewrite_id'])} - {item.get('title')}")
+    for path in created:
+        print(f"created: {path}")
+    for line in failed:
+        print(f"failed: {line}")
+    print(
+        f"summary: created {len(created)}, skipped {len(skipped)}, "
+        f"needs text {len(needs_text)}, failed {len(failed)}"
+    )
+    return 1 if failed or (needs_text and not args.plan) else 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="import letterly magic rewrites into the vault")
+    parser.add_argument("--vault", help="vault root; detected from .smart-env/ when omitted")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    window = sub.add_parser("window", help="print the created_after date for list_notes")
+    window.add_argument("--lookback-days", type=int, default=LOOKBACK_DAYS)
+    window.set_defaults(func=command_window)
+
+    imp = sub.add_parser("import", help="write new notes from a batch dir into unprocessed/")
+    imp.add_argument("batch_dir")
+    imp.add_argument("--plan", action="store_true", help="only report which rewrites still need their text")
+    imp.set_defaults(func=command_import)
+    return parser
+
 
 if __name__ == "__main__":
-    v_root = sys.argv[1] if len(sys.argv) > 1 else get_vault_root()
-    process_letterly_csv(v_root)
+    parsed = build_parser().parse_args()
+    sys.exit(parsed.func(parsed))
