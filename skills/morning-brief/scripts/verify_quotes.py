@@ -6,7 +6,7 @@
 verify_quotes.py - prove that every quote in the morning brief is word for word.
 
 Usage:
-    uv run verify_quotes.py quotes.txt --source "My Ignition Library.md" --source night.txt
+    uv run verify_quotes.py quotes.txt --source "My Ignition Library v2.md" --source night.txt
     printf '%s\n' "quote one" "quote two" | uv run verify_quotes.py - --source a.md
 
 quotes.txt holds one quote per line. a quote passes when it appears in at least

@@ -1,6 +1,6 @@
 ---
 name: morning-brief
-description: Rami's 2-minute morning brief. Reads last night's and this morning's voice notes (Letterly) or typed plan, plus My Ignition Library and My Morning Fire, and replies with today's locked main task, a personal why for each task, and his own words quoted word for word. Use when Rami runs /morning-brief or asks for his morning brief.
+description: Rami's 2-minute morning brief. Reads last night's and this morning's voice notes (Letterly) or typed plan, plus My Ignition Library v2 and My Morning Fire v2, and replies with today's locked main task, a personal why for each task, and his own words quoted word for word. Use when Rami runs /morning-brief or asks for his morning brief.
 compatibility: >-
   Needs the letterly mcp for voice notes and uv for the quote check. Reads the
   Obsidian vault at ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian.
@@ -32,8 +32,8 @@ let `TODAY` be the local date (`date +%F`) and `YESTERDAY` the day before. let `
 2. **night input.** from the same list, take the notes created from YESTERDAY 18:00 to TODAY 04:00. call `get_note` for each. use the transcription, not a rewrite, as the quote source.
 3. **the locked sentence.** look for the shutdown sentence ("tomorrow i ...") in this order: the night notes, the morning input, then `My Calendar/My Daily Notes/TODAY.md` and `YESTERDAY.md` in the vault. copy it word for word.
 4. **the fire.** read these vault files in full:
-   - `My Morning Fire.md`
-   - `My Ignition Library.md`
+   - `My Morning Fire v2.md`
+   - `My Ignition Library v2.md`
    - `My Outputs/Transcriptions/Breaking the Cycle and Building Routines.md` (the note this routine was born from; its blessing paragraph is a valid source)
 5. **connectors.** if a calendar or task tool (for example ticktick or google calendar) is available and authorized in this session, read today's items from it. if not, skip it silently.
 
@@ -42,7 +42,7 @@ save each voice note text to `WORK/` (for example `night-1.txt`, `morning-1.txt`
 ## step 2: build the brief
 
 - **tasks.** list only the tasks rami named (morning input, locked sentence, connectors). keep his order. keep his times. if he gave no time, show none. if he named no tasks, the today section is one line: `no tasks named yet. say them: what i want to do, what i have to do, and when.`
-- **the why line.** one line per task, max 20 words, lowercase, in his voice. build it only from evidence: what he said about the task, who it serves, the bets in [[My Morning Fire]], his purpose (build useful things, form meaningful relationships). name the real person or stake when the evidence names one. no generic motivation ("you've got this", "crush it"). no invented stakes.
+- **the why line.** one line per task, max 20 words, lowercase, in his voice. build it only from evidence: what he said about the task, who it serves, the bets in [[My Morning Fire v2]], his purpose (build useful things, form meaningful relationships). name the real person or stake when the evidence names one. no generic motivation ("you've got this", "crush it"). no invented stakes.
 - **my words.** pick 3 to 5 quotes that fit today's tasks and today's mood. prefer the ignition library and morning fire; a line from last night's note is welcome when it hits. the quotes must be full phrases that stand alone. if rami sounds behind, low, or lousy, include one quote about blessings or people betting on him.
 - **the blessing.** one quote, word for word, about what he has right now or the opportunities others never get.
 
@@ -52,8 +52,8 @@ write every quote (the locked sentence, my words, the blessing) to `WORK/quotes.
 
 ```bash
 uv run ~/.agents/skills/morning-brief/scripts/verify_quotes.py "$WORK/quotes.txt" \
-  --source "<vault>/My Morning Fire.md" \
-  --source "<vault>/My Ignition Library.md" \
+  --source "<vault>/My Morning Fire v2.md" \
+  --source "<vault>/My Ignition Library v2.md" \
   --source "<vault>/My Outputs/Transcriptions/Breaking the Cycle and Building Routines.md" \
   --source "$WORK"/night-1.txt  # plus every other saved input file
 ```
