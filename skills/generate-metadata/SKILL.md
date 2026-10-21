@@ -196,7 +196,7 @@ Weak:
 2. Read each full markdown file.
 3. Extract metadata for each file using every managed field.
 4. Put empty arrays in list fields with no signal.
-5. Write the metadata payload to `/tmp/generate-metadata-<short-name>.json` or a batch file in `/tmp/`.
+5. Write the metadata payload to a new file that no other run can use: create it with `mktemp /tmp/generate-metadata-XXXXXX.json`. Never reuse a fixed name such as `/tmp/metadata-batch.json`. Parallel agents that share a file overwrite each other's payloads.
 6. Run the bundled script to merge metadata into frontmatter.
 7. Run validation after applying metadata.
 8. Report which files passed and which failed.
