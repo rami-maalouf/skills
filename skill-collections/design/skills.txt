@@ -1,0 +1,4 @@
+# one canonical skill name per line
+face-variations
+youtube-thumbnail
+rami-voice

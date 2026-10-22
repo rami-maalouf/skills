@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!--
+  1280x720 thumbnail layout. copy it into the video's thumbnail folder, fill the slots, then render:
+    uv run <skill>/scripts/render.py thumb-a.html --title "..." --channel "..." --duration 9:41
+  keep the bottom-right corner (about 180x60 px) free of anything important: youtube puts the video length there.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800;900&family=Caveat:wght@600&display=block" rel="stylesheet">
+<style>
+  :root {
+    --glow-left: #5b4fd6;
+    --glow-right: #e46f43;
+    --base: #08070f;
+    --label: #b8b8c2;
+  }
+
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 720px; overflow: hidden; }
+
+  .canvas {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    overflow: hidden;
+    font-family: "Inter", sans-serif;
+    background:
+      radial-gradient(60% 80% at 22% 70%, color-mix(in srgb, var(--glow-left) 70%, transparent), transparent 70%),
+      radial-gradient(55% 80% at 82% 75%, color-mix(in srgb, var(--glow-right) 75%, transparent), transparent 70%),
+      var(--base);
+  }
+
+  /* faint grid, as in the ai-model-comparison thumbnail */
+  .grid {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    background-size: 160px 160px;
+  }
+
+  /* a face plate from face-variations used as the whole background */
+  .plate { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+  /* a cut-out person standing on the bottom edge */
+  .person { position: absolute; bottom: 0; left: 50%; height: 600px; transform: translateX(-50%); }
+
+  .headline {
+    position: absolute;
+    top: 96px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 124px;
+    font-weight: 900;
+    line-height: 1;
+    letter-spacing: -0.045em;
+    background: linear-gradient(180deg, #ffffff 45%, #a3a3ad 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 8px 20px rgba(0, 0, 0, 0.5));
+  }
+
+  .logo {
+    position: absolute;
+    width: 220px;
+    height: 220px;
+    border-radius: 50px;
+    box-shadow: 0 24px 50px rgba(0, 0, 0, 0.45);
+    object-fit: cover;
+  }
+
+  .logo.left { left: 120px; top: 270px; transform: rotate(-6deg); }
+  .logo.right { right: 120px; top: 190px; transform: rotate(6deg); }
+
+  .label {
+    position: absolute;
+    font-family: "Caveat", cursive;
+    font-size: 58px;
+    color: var(--label);
+  }
+
+  .label.left { left: 40px; top: 520px; transform: rotate(28deg); }
+  .label.right { right: 40px; top: 420px; transform: rotate(-28deg); }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="grid"></div>
+
+    <!-- slot: background photo. use it OR the cut-out person, not both -->
+    <!-- <img class="plate" src="faces/01-shocked.png" alt=""> -->
+
+    <!-- slot: cut-out person -->
+    <!-- <img class="person" src="faces/person-cutout.png" alt=""> -->
+
+    <!-- slot: 3-5 words that add to the title, never repeat it -->
+    <div class="headline">The ultimate test</div>
+
+    <!-- slot: real logo files only, never drawn by an image model -->
+    <!-- <img class="logo left" src="logos/left.png" alt=""> -->
+    <!-- <img class="logo right" src="logos/right.png" alt=""> -->
+
+    <!-- slot: optional handwritten labels -->
+    <!-- <div class="label left">GPT 5.6</div> -->
+    <!-- <div class="label right">Fable 5</div> -->
+  </div>
+</body>
+</html>
