@@ -30,6 +30,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from catalog import tag as catalog_tag
+
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_REFS = 8
 TIMEOUT_S = 600
@@ -237,6 +239,7 @@ def main() -> None:
     ap.add_argument("--out", help="output folder (default: <face>/variations/<date>-<look>-<first prompt>)")
     ap.add_argument("--parallel", type=int, default=3, help="codex runs at the same time (default 3)")
     ap.add_argument("--dry-run", action="store_true", help="print the prompts and stop. costs nothing")
+    ap.add_argument("--no-tag", action="store_true", help="do not add the new images to the face catalog")
     args = ap.parse_args()
 
     face = Path(args.face).expanduser().resolve()
@@ -302,6 +305,12 @@ def main() -> None:
     ok = sum(r["ok"] for r in results)
     print(f"\n{ok}/{len(results)} image(s) in {out}")
     print(f"contact sheet: {out / 'contact-sheet.jpg'}")
+
+    # new images inside the face library go into its catalog right away, so they can be filtered like the rest
+    made = [Path(r["out_file"]) for r in results if r["ok"]]
+    if made and not args.no_tag and out.is_relative_to(face):
+        print("tagging the new image(s) for the catalog...", file=sys.stderr)
+        catalog_tag(face, [], retag=False, parallel=args.parallel, model=None, only=made)
     sys.exit(0 if ok == len(results) else 1)
 
 

@@ -1,6 +1,6 @@
 ---
 name: face-variations
-description: Generate new images of one specific real person from a library of their reference photos (all angles and expressions) - one or many variations with a chosen expression, pose, framing and backdrop, for thumbnails, posters and other designs. Uses Codex's built-in image tool (gpt-image-2 on the ChatGPT plan, no API key). Use when asked for "a picture of me looking shocked", face expressions, face variations, a new photo of a person from their references, or a face for a thumbnail.
+description: Generate new images of one specific real person from a library of their reference photos (all angles and expressions) - one or many variations with a chosen expression, pose, framing and backdrop, for thumbnails, posters and other designs. Uses Codex's built-in image tool (gpt-image-2 on the ChatGPT plan, no API key). Also keeps a tagged catalog of every photo of the person (expression, gesture, facial hair, glasses, pose, light) to filter and mix them. Use when asked for "a picture of me looking shocked", face expressions, face variations, a new photo of a person from their references, a face for a thumbnail, or to tag, find or filter photos of a person.
 ---
 
 # face-variations
@@ -15,7 +15,8 @@ one folder per person, inside the workspace that uses it (in life-os: `design/fa
 
 ```
 faces/<person>/
-  profile.md       # name, identity-lock bullets (shared and per look), default look, which refs are missing
+  profile.md       # name, source photos folder, identity-lock bullets (shared and per look), which refs are missing
+  catalog.json     # tags for every image of the person (see "the catalog")
   refs/<look>/     # 6-12 reference photos per look: the identity
   approved/        # generated images the person approved: safe to reuse as refs
   variations/      # default output: <date>-<look>-<slug>/ with images, manifest.json, contact-sheet.jpg
@@ -67,16 +68,42 @@ default look: <look>        (optional)
 
 the script copies the bullets under `## identity lock` and under the chosen `## look: <name>` into each prompt. write a bullet when a result drifts on that feature, so it does not drift again.
 
+## the catalog
+
+`scripts/catalog.py` tags every image of the person with a fixed vocabulary, so you can filter and mix them. it covers `refs/`, `approved/`, `variations/` and the folders on the `source photos:` line of `profile.md`. codex looks at each image (`codex exec` with a json schema, about 10 seconds each, 4 at a time) on the chatgpt plan.
+
+```bash
+uv run scripts/catalog.py tag --face design/faces/rami          # new and changed images only; run it after adding photos
+uv run scripts/catalog.py fields                                # the vocabulary
+uv run scripts/catalog.py summary --face design/faces/rami      # how many images have each value
+uv run scripts/catalog.py find --face design/faces/rami \
+  --where look=mustache --where hands=pointing-up,pointing-up-both-hands --not expression=confused \
+  --sheet /tmp/pointing.jpg                                     # paths, plus a contact sheet to look at
+uv run scripts/catalog.py set --face design/faces/rami photo-12.jpg facial_hair=short-beard   # fix a wrong tag
+uv run scripts/catalog.py finder --face design/faces/rami       # copy the tags to finder tags on the source photos
+```
+
+- fields: expression, mouth, eyes, eyebrows, gaze, head, hands (pointing and other gestures), facial_hair, glasses, hair, framing, lighting, background_type, quality, plus description, clothing, background, props, extra_tags. left and right are from the viewer's side.
+- every record also has kind (photo, ref, generated, approved), look, taken (date), size and sha256. `--where` values are or-ed with commas; several `--where` are and-ed.
+- a photo gets its look from its date: put `photos taken: <date>` lines under each `## look:` heading in `profile.md`.
+- after tagging, the script lists images whose facial hair or glasses differ from the rest of their look. those are usually tagging mistakes: look at the image, then fix it with `set`. `tag --retag` tags everything again and overwrites fixes made with `set`.
+- a file that moves keeps its tags (matched by its sha256). an entry is dropped when its file is gone from a folder that was scanned. entries from a folder that does not exist on this machine stay.
+- `generate.py` tags its new images automatically when they are saved inside the face folder (`--no-tag` to skip).
+- finder tags: `finder` writes the main tags into each source photo's finder tags, so finder search (`tag:pointing-up`) works. `finder --clear` removes them. run it again after `tag` or `set`.
+
+use the catalog before you generate: when a real photo already has the expression and gesture you need, it beats a generated one.
+
 ## workflow
 
-1. **check the library and pick the look.** read `profile.md` and list `refs/`. if the request does not say which look and there is no default look, ask. if the look has fewer than 5 refs, say that likeness will suffer and name the missing angles before you spend images.
-2. **pick the refs for the job.** by default the script sends the whole look folder (up to 8). for a target angle, pick refs close to it with `--ref` (a 3/4 pose: the 3/4 refs plus the front one). each ref has one job: identity. never pass a style or layout example as a ref: it leaks into the face.
-3. **write the variation in physical terms.** say what the face does, not the emotion word alone. one change per variation. see the expression table below.
-4. **dry-run first** when you write new prompts. it prints every prompt and costs nothing:
+1. **look for a real photo first.** `catalog.py find` with the expression, gesture and look you need. if a real photo fits, use it and stop.
+2. **check the library and pick the look.** read `profile.md` and list `refs/`. if the request does not say which look and there is no default look, ask. if the look has fewer than 5 refs, say that likeness will suffer and name the missing angles before you spend images.
+3. **pick the refs for the job.** by default the script sends the whole look folder (up to 8). for a target angle, pick refs close to it with `--ref` (a 3/4 pose: the 3/4 refs plus the front one). each ref has one job: identity. never pass a style or layout example as a ref: it leaks into the face.
+4. **write the variation in physical terms.** say what the face does, not the emotion word alone. one change per variation. see the expression table below.
+5. **dry-run first** when you write new prompts. it prints every prompt and costs nothing:
    ```bash
    uv run scripts/generate.py --face design/faces/rami --look beard --prompt "..." --dry-run
    ```
-5. **generate.** one `codex exec` per image, 3 at a time:
+6. **generate.** one `codex exec` per image, 3 at a time:
    ```bash
    uv run scripts/generate.py --face design/faces/rami --look beard \
      --prompt "laughing: wide open-mouth smile, cheeks raised, eyes narrowed, head tilted a little left" \
@@ -84,9 +111,9 @@ the script copies the bullets under `## identity lock` and under the chosen `## 
      --count 2 --out design/thumbnails/<slug>/faces
    ```
    options: `--look <name>`, `--aspect landscape|portrait|square`, `--framing "..."`, `--backdrop "..."`, `--asset "..."`, `--ref <file>` (repeat), `--parallel N`.
-6. **review before you show.** open `contact-sheet.jpg` (refs on top, results below) and compare each result to the refs: eye shape, nose, hairline, hair texture, facial hair, glasses, skin tone, age. drop any result that drifts, and say which feature drifted. a result can look like a sibling and still be wrong: if in doubt, drop it.
-7. **show the person the kept results**, with paths. only when they approve one, copy it to `approved/`. never feed an unapproved result back in as a ref: drift adds up over generations.
-8. **when a result drifts the same way twice**, add an identity-lock bullet to `profile.md`.
+7. **review before you show.** open `contact-sheet.jpg` (refs on top, results below) and compare each result to the refs: eye shape, nose, hairline, hair texture, facial hair, glasses, skin tone, age. drop any result that drifts, and say which feature drifted. a result can look like a sibling and still be wrong: if in doubt, drop it.
+8. **show the person the kept results**, with paths. only when they approve one, copy it to `approved/`. never feed an unapproved result back in as a ref: drift adds up over generations.
+9. **when a result drifts the same way twice**, add an identity-lock bullet to `profile.md`.
 
 ## expression table
 

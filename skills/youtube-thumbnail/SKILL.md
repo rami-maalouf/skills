@@ -52,7 +52,7 @@ show the concepts to rami as a short list, and get a pick or a "make all" before
 
 ## 5. make the assets
 
-- **face:** use the `face-variations` skill with the person's face library (`design/faces/<person>/`). for a full-bleed photo, ask for a plate with the face on one side and space for the text, and a backdrop in the design colors. save to `<build folder>/faces/`.
+- **face:** first search the person's real photos with the `face-variations` catalog (`catalog.py find --where expression=... --where hands=...`); a real photo that fits beats a generated one. otherwise generate with the `face-variations` skill and the person's face library (`design/faces/<person>/`), in the look rami names. for a full-bleed photo, ask for a plate with the face on one side and space for the text, and a backdrop in the design colors. save to `<build folder>/faces/`.
 - **logos:** real files from the official source (press kit, brand page, simple icons). run `file` on each download to make sure it is an image and not an html error page. never let the image model draw a logo.
 - **screens and products:** real screenshots or frames from the video, so the thumbnail shows what the video shows.
 
