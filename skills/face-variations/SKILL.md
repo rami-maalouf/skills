@@ -15,11 +15,15 @@ one folder per person, inside the workspace that uses it (in life-os: `design/fa
 
 ```
 faces/<person>/
-  profile.md     # name, the identity-lock bullets, which refs exist and which are missing
-  refs/          # 8-12 reference photos: the identity
-  approved/      # generated images the person approved: safe to reuse as refs
-  variations/    # default output: <date>-<slug>/ with images, manifest.json, contact-sheet.jpg
+  profile.md       # name, identity-lock bullets (shared and per look), default look, which refs are missing
+  refs/<look>/     # 6-12 reference photos per look: the identity
+  approved/        # generated images the person approved: safe to reuse as refs
+  variations/      # default output: <date>-<look>-<slug>/ with images, manifest.json, contact-sheet.jpg
 ```
+
+### looks
+
+a look is how the person looked in one period: hair length, facial hair, glasses. each look gets its own folder under `refs/`, for example `refs/beard/` and `refs/mustache/`. never mix looks in one run: the model averages them, and the result matches neither. the script uses one look per run: `--look <name>`, or `default look: <name>` in `profile.md`, or the only look there is. a person with one look can keep the photos straight in `refs/`.
 
 ### reference photos
 
@@ -27,6 +31,7 @@ likeness improves with more good references. aim for 8-12, at least 1024 px on t
 
 - angles: front, 3/4 left, 3/4 right, slightly from above, slightly from below
 - expressions: neutral, smiling with teeth, talking, one strong expression (surprised, laughing)
+- mix the expressions: when most refs show one expression, results keep it (a mustache set of mostly surprised photos gave a laughing face with wide, surprised eyes)
 - light: soft indoor light and harder daylight
 - distance: mostly head and shoulders, one or two closer face shots
 - one person per photo. no sunglasses, no hats, no heavy filters, no motion blur
@@ -35,40 +40,51 @@ likeness improves with more good references. aim for 8-12, at least 1024 px on t
 
 name files by what they show: `front-neutral.jpg`, `3q-left-smile.jpg`, `below-talking.jpg`. the names help you pick refs per job.
 
+**crop raw photos with `scripts/prepare_refs.py`.** it finds the face, crops to head and shoulders at 4:5, and saves a jpg of at most 1600 px. tight crops give the model more pixels of the face, and keep hands and props out of the refs:
+
+```bash
+uv run scripts/prepare_refs.py --out-dir design/faces/rami/refs/beard "raw/IMG_1.jpg=front-neutral" "raw/IMG_2.jpg=3q-left-smile"
+```
+
+it fails, and says so, when it finds no face: crop that photo by hand. look at every crop before you keep it. photo booth file names such as "Photo on ... 1.14 PM.jpg" contain a narrow space before "PM": pass those paths through a shell glob, not typed by hand.
+
 ### profile.md
 
 ```markdown
 # <name>
 
+default look: <look>        (optional)
+
 ## identity lock
-- <a feature that drifts, said as a physical fact: "tight dark curls with high volume; one curl falls over the forehead">
-- <...>
+- <a feature that drifts in every look, said as a physical fact: "tight dark curls with high volume">
+
+## look: <look>
+- <what is true only in this look: "mustache only: the cheeks and chin are clean-shaven">
 
 ## refs
-- have: <list>
-- missing: <angles or expressions not yet covered>
+- <look> (<count>): <what is covered>. missing: <angles or expressions>
 ```
 
-the script copies every bullet under `## identity lock` into each prompt. write a bullet when a result drifts on that feature, so it does not drift again.
+the script copies the bullets under `## identity lock` and under the chosen `## look: <name>` into each prompt. write a bullet when a result drifts on that feature, so it does not drift again.
 
 ## workflow
 
-1. **check the library.** read `profile.md` and list `refs/`. if there are fewer than 5 refs, say that likeness will suffer and name the missing angles before you spend images.
-2. **pick the refs for the job.** by default the script sends all of `refs/` (up to 8). for a target angle, pick refs close to it with `--ref` (a 3/4 pose: the 3/4 refs plus the front one). each ref has one job: identity. never pass a style or layout example as a ref: it leaks into the face.
+1. **check the library and pick the look.** read `profile.md` and list `refs/`. if the request does not say which look and there is no default look, ask. if the look has fewer than 5 refs, say that likeness will suffer and name the missing angles before you spend images.
+2. **pick the refs for the job.** by default the script sends the whole look folder (up to 8). for a target angle, pick refs close to it with `--ref` (a 3/4 pose: the 3/4 refs plus the front one). each ref has one job: identity. never pass a style or layout example as a ref: it leaks into the face.
 3. **write the variation in physical terms.** say what the face does, not the emotion word alone. one change per variation. see the expression table below.
 4. **dry-run first** when you write new prompts. it prints every prompt and costs nothing:
    ```bash
-   uv run scripts/generate.py --face design/faces/rami --prompt "..." --dry-run
+   uv run scripts/generate.py --face design/faces/rami --look beard --prompt "..." --dry-run
    ```
 5. **generate.** one `codex exec` per image, 3 at a time:
    ```bash
-   uv run scripts/generate.py --face design/faces/rami \
+   uv run scripts/generate.py --face design/faces/rami --look beard \
      --prompt "laughing: wide open-mouth smile, cheeks raised, eyes narrowed, head tilted a little left" \
      --prompt "skeptical: one eyebrow raised, lips pressed to one side, chin slightly down" \
      --count 2 --out design/thumbnails/<slug>/faces
    ```
-   options: `--aspect landscape|portrait|square`, `--framing "..."`, `--backdrop "..."`, `--asset "..."`, `--ref <file>` (repeat), `--parallel N`.
-6. **review before you show.** open `contact-sheet.jpg` (refs on top, results below) and compare each result to the refs: eye shape, nose, hairline, hair texture, beard line, skin tone, age. drop any result that drifts, and say which feature drifted. a result can look like a sibling and still be wrong: if in doubt, drop it.
+   options: `--look <name>`, `--aspect landscape|portrait|square`, `--framing "..."`, `--backdrop "..."`, `--asset "..."`, `--ref <file>` (repeat), `--parallel N`.
+6. **review before you show.** open `contact-sheet.jpg` (refs on top, results below) and compare each result to the refs: eye shape, nose, hairline, hair texture, facial hair, glasses, skin tone, age. drop any result that drifts, and say which feature drifted. a result can look like a sibling and still be wrong: if in doubt, drop it.
 7. **show the person the kept results**, with paths. only when they approve one, copy it to `approved/`. never feed an unapproved result back in as a ref: drift adds up over generations.
 8. **when a result drifts the same way twice**, add an identity-lock bullet to `profile.md`.
 

@@ -8,7 +8,7 @@ the built-in tool runs on the chatgpt plan that codex is signed in with, so no a
 each variant is its own `codex exec` run, so one bad result never affects the others.
 
 usage:
-  uv run generate.py --face design/faces/rami --prompt "laughing, head tilted left"
+  uv run generate.py --face design/faces/rami --look beard --prompt "laughing, head tilted left"
   uv run generate.py --face design/faces/rami --prompt "shocked" --prompt "skeptical" --count 2 --out design/thumbnails/x/faces
   uv run generate.py --face design/faces/rami --prompt "shocked" --dry-run
 """
@@ -44,8 +44,8 @@ PROMPT = """Use $imagegen with the built-in image_gen tool. Do not use the CLI f
 
 Use case: identity-preserve
 Asset type: {asset}
-Input images: {images} of one real person{name}. Take only the identity from them: face, hair, beard and skin. Ignore their backgrounds, text, logos and lighting.
-Identity lock: keep the same bone structure, face shape, eye shape and color, eyebrows, nose, lips, ears, hairline, hair texture and volume, beard line and density, skin tone and age as the references. Do not beautify, slim, smooth, average or restyle the face.
+Input images: {images} of one real person{name}. Take only the identity from them: face, hair, facial hair and skin. Ignore their backgrounds, text, logos and lighting.
+Identity lock: keep the same bone structure, face shape, eye shape and color, eyebrows, nose, lips, ears, hairline, hair texture and volume, facial hair shape and density, glasses or no glasses, skin tone and age as the references. Do not beautify, slim, smooth, average or restyle the face.
 {profile}Primary request: {prompt}
 Composition/framing: {framing}
 Scene/backdrop: {backdrop}
@@ -63,11 +63,35 @@ def slug(text: str, n: int = 40) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:n].strip("-") or "variant"
 
 
-def list_refs(face: Path, picked: list[str]) -> list[Path]:
+def images_in(folder: Path) -> list[Path]:
+    return sorted(p for p in folder.glob("*") if p.suffix.lower() in IMAGE_EXTS)
+
+
+def pick_look(face: Path, look: str | None) -> str | None:
+    # a look is one folder under refs/: the hair, facial hair and glasses of one period. never mix looks in one run
+    refs = face / "refs"
+    looks = sorted(p.name for p in refs.iterdir() if p.is_dir()) if refs.is_dir() else []
+    if look:
+        if look not in looks:
+            sys.exit(f"no look '{look}' in {refs}. looks: {', '.join(looks) or 'none'}")
+        return look
+    if images_in(refs) or not looks:
+        return None
+    if len(looks) == 1:
+        return looks[0]
+    profile = face / "profile.md"
+    match = re.search(r"^default look:\s*(\S+)", profile.read_text(), re.MULTILINE) if profile.is_file() else None
+    if match and match.group(1) in looks:
+        return match.group(1)
+    sys.exit(f"{face.name} has several looks: {', '.join(looks)}. pick one with --look.")
+
+
+def list_refs(face: Path, look: str | None, picked: list[str]) -> list[Path]:
+    folder = face / "refs" / look if look else face / "refs"
     if picked:
         refs = [Path(p).expanduser().resolve() for p in picked]
     else:
-        refs = sorted(p for p in (face / "refs").glob("*") if p.suffix.lower() in IMAGE_EXTS)
+        refs = images_in(folder)
         if len(refs) > MAX_REFS:
             print(f"note: {len(refs)} refs found, using the first {MAX_REFS}. pick refs with --ref to choose.", file=sys.stderr)
             refs = refs[:MAX_REFS]
@@ -75,19 +99,20 @@ def list_refs(face: Path, picked: list[str]) -> list[Path]:
     if missing:
         sys.exit(f"missing reference photos: {', '.join(missing)}")
     if not refs:
-        sys.exit(f"no reference photos in {face / 'refs'}. add 8-12 photos first (see SKILL.md).")
+        sys.exit(f"no reference photos in {folder}. add 8-12 photos first (see SKILL.md).")
     return refs
 
 
-def identity_lines(face: Path) -> str:
-    # the bullets under "## identity lock" in profile.md name the features that drift for this person
+def identity_lines(face: Path, look: str | None) -> str:
+    # bullets under "## identity lock" (every look) and "## look: <name>" in profile.md name the features that drift
     profile = face / "profile.md"
     if not profile.is_file():
         return ""
+    wanted = {"## identity lock"} | ({f"## look: {look}"} if look else set())
     lines, inside = [], False
     for line in profile.read_text().splitlines():
         if line.startswith("## "):
-            inside = line.strip().lower() == "## identity lock"
+            inside = line.strip().lower() in wanted
             continue
         if inside and line.strip().startswith("- "):
             lines.append(line.strip()[2:])
@@ -201,14 +226,15 @@ def contact_sheet(refs: list[Path], results: list[dict], path: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--face", required=True, help="face folder with refs/ and an optional profile.md")
+    ap.add_argument("--look", help="the refs/<look>/ folder to use (default: the only look, or 'default look:' in profile.md)")
     ap.add_argument("--prompt", action="append", required=True, help="one variation: expression, pose, scene. repeat for more")
     ap.add_argument("--count", type=int, default=1, help="images per prompt (default 1)")
-    ap.add_argument("--ref", action="append", default=[], help="use these reference photos instead of all of refs/")
+    ap.add_argument("--ref", action="append", default=[], help="use these reference photos instead of the look's whole folder")
     ap.add_argument("--aspect", choices=FRAMING, default="landscape")
     ap.add_argument("--framing", help="replace the default framing line")
     ap.add_argument("--backdrop", default="flat solid mid-gray studio background", help="the scene behind the person")
     ap.add_argument("--asset", default="youtube thumbnail photo", help="where the image will be used")
-    ap.add_argument("--out", help="output folder (default: <face>/variations/<date>-<first prompt>)")
+    ap.add_argument("--out", help="output folder (default: <face>/variations/<date>-<look>-<first prompt>)")
     ap.add_argument("--parallel", type=int, default=3, help="codex runs at the same time (default 3)")
     ap.add_argument("--dry-run", action="store_true", help="print the prompts and stop. costs nothing")
     args = ap.parse_args()
@@ -216,18 +242,20 @@ def main() -> None:
     face = Path(args.face).expanduser().resolve()
     if not face.is_dir():
         sys.exit(f"face folder not found: {face}")
-    refs = list_refs(face, args.ref)
+    look = pick_look(face, args.look)
+    refs = list_refs(face, look, args.ref)
     if len(refs) < 5:
         print(f"note: only {len(refs)} reference photo(s). likeness is better with 8-12 (see SKILL.md).", file=sys.stderr)
 
-    out = Path(args.out).expanduser().resolve() if args.out else face / "variations" / f"{dt.date.today()}-{slug(args.prompt[0], 30)}"
+    default_out = face / "variations" / "-".join(filter(None, [str(dt.date.today()), look, slug(args.prompt[0], 30)]))
+    out = Path(args.out).expanduser().resolve() if args.out else default_out
     jobs = []
     for p_i, text in enumerate(args.prompt, 1):
         prompt = PROMPT.format(
             asset=args.asset,
             images="Image 1 is an identity reference" if len(refs) == 1 else f"Image 1 to Image {len(refs)} are identity references",
             name=person_name(face),
-            profile=identity_lines(face),
+            profile=identity_lines(face, look),
             prompt=text,
             framing=args.framing or FRAMING[args.aspect],
             backdrop=args.backdrop,
@@ -237,6 +265,7 @@ def main() -> None:
             jobs.append({"variation": text, "prompt": prompt, "out_file": str(out / name)})
 
     if args.dry_run:
+        print(f"look: {look or '(none)'}")
         print(f"refs ({len(refs)}): " + ", ".join(str(r) for r in refs))
         print(f"out: {out}\n")
         for job in jobs:
@@ -263,6 +292,7 @@ def main() -> None:
     manifest = {
         "created": dt.datetime.now().isoformat(timespec="seconds"),
         "face": str(face),
+        "look": look,
         "refs": [str(r) for r in refs],
         "results": results,
     }
